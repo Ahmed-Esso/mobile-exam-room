@@ -2,34 +2,25 @@
 
 import { useMemo, useState } from 'react';
 import {
-  Bot,
   Check,
   ChevronRight,
   Copy,
   FileText,
+  FileUp,
   Hourglass,
   Loader2,
   LogOut,
   Play,
-  Plus,
   Share2,
+  Sparkles,
   Timer,
   Users,
   X,
   Zap,
 } from 'lucide-react';
-import type { GameMode, Member, UseRoomReturn } from '@/types/exam';
-import { SAMPLE_EXAM_PACKS } from '@/lib/sample-exams';
-import { parseMarkdownQuestions } from '@/lib/markdown-parser';
-import { Avatar, Toggle, copyText, haptic } from './ui';
+import type { GameMode, UseRoomReturn } from '@/types/exam';
+import { Avatar, Markdown, copyText, haptic } from './ui';
 import MarkdownQuestionModal from './MarkdownQuestionModal';
-
-const PERSONALITIES: { id: NonNullable<Member['botPersonality']>; label: string; hint: string }[] = [
-  { id: 'genius', label: 'Genius', hint: 'Rarely wrong' },
-  { id: 'speedster', label: 'Speedster', hint: 'Fast, sloppy' },
-  { id: 'careful', label: 'Careful', hint: 'Slow, steady' },
-  { id: 'wildcard', label: 'Wildcard', hint: 'Chaos' },
-];
 
 const TIMES = [15, 30, 45, 60, 90];
 
@@ -54,7 +45,6 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
   const { room, me, isHost } = api;
   const [copied, setCopied] = useState<'code' | 'link' | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
-  const [botMenu, setBotMenu] = useState(false);
   const [starting, setStarting] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
 
@@ -88,26 +78,16 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
     if (await copyText(inviteUrl)) flashCopied('link');
   };
 
-  const currentPackId = SAMPLE_EXAM_PACKS.find((p) => p.title === room.title)?.id;
-
-  const loadPack = async (packId: string) => {
-    if (!isHost) return;
-    const pack = SAMPLE_EXAM_PACKS.find((p) => p.id === packId);
-    if (!pack) return;
-    haptic(8);
-    const parsed = parseMarkdownQuestions(pack.markdown);
-    if (parsed.questions.length) await api.setQuestions(parsed.questions, pack.title);
-  };
-
   const start = async () => {
+    if (room.questions.length === 0) return;
     setStarting(true);
     haptic([12, 40, 20]);
     await api.startExam();
     setStarting(false);
   };
 
-  const humans = room.members.filter((m) => !m.isBot).length;
-  const bots = room.members.length - humans;
+  const playerCount = room.members.length;
+  const hasQuestions = room.questions.length > 0;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -132,7 +112,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
             </button>
             <span className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-3 py-1.5 text-xs font-semibold text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
               <span className="live-dot h-1.5 w-1.5 rounded-full bg-[var(--lime)]" />
-              Lobby · {room.members.length} in room
+              Lobby · {playerCount} {playerCount === 1 ? 'player' : 'players'}
             </span>
           </header>
 
@@ -178,22 +158,28 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
           {/* Members */}
           <section className="panel rise mt-6 p-4" style={{ animationDelay: '60ms' }}>
             <div className="flex items-center justify-between">
-              <h2 className="font-display text-lg font-bold">Who&apos;s here</h2>
+              <h2 className="font-display text-lg font-bold">Who&apos;s in the room</h2>
               <span className="text-xs text-[var(--muted)] tabular">
-                {humans} {humans === 1 ? 'person' : 'people'}
-                {bots ? ` · ${bots} ${bots === 1 ? 'bot' : 'bots'}` : ''}
+                {playerCount} {playerCount === 1 ? 'player' : 'players'} connected
               </span>
             </div>
             <ul className="mt-4 grid grid-cols-4 gap-x-2 gap-y-4">
               {room.members.map((m, i) => (
-                <li key={m.id} className="pop relative flex flex-col items-center gap-1.5" style={{ animationDelay: `${i * 40}ms` }}>
-                  <Avatar emoji={m.avatar} size={52} host={m.id === room.hostId} badge={m.statusBadge} ring={m.id === me?.id ? 'me' : 'none'} />
+                <li
+                  key={m.id}
+                  className="pop relative flex flex-col items-center gap-1.5"
+                  style={{ animationDelay: `${i * 40}ms` }}
+                >
+                  <Avatar
+                    emoji={m.avatar}
+                    size={52}
+                    host={m.id === room.hostId}
+                    badge={m.statusBadge}
+                    ring={m.id === me?.id ? 'me' : 'none'}
+                  />
                   <span className="w-full truncate text-center text-xs font-semibold">
-                    {m.id === me?.id ? 'You' : m.name}
+                    {m.id === me?.id ? `${m.name} (You)` : m.name}
                   </span>
-                  {m.isBot ? (
-                    <span className="-mt-1 text-[10px] font-medium capitalize text-[var(--peri)]">{m.botPersonality ?? 'bot'}</span>
-                  ) : null}
                   {isHost && m.id !== me?.id ? (
                     <button
                       type="button"
@@ -209,62 +195,89 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                   ) : null}
                 </li>
               ))}
-              {isHost ? (
-                <li className="flex flex-col items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      haptic(6);
-                      setBotMenu((v) => !v);
-                    }}
-                    aria-expanded={botMenu}
-                    className="press flex h-[52px] w-[52px] items-center justify-center rounded-full border-2 border-dashed border-[var(--line-strong)] text-[var(--muted)] hover:text-[var(--paper)]"
-                    aria-label="Add practice bot friend"
-                  >
-                    <Plus size={20} />
-                  </button>
-                  <span className="text-xs font-medium text-[var(--muted)]">Add bot</span>
-                </li>
-              ) : null}
             </ul>
+            {playerCount === 1 ? (
+              <p className="mt-3 rounded-xl bg-[var(--ink-2)] px-3 py-2 text-center text-xs text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
+                Share code <span className="code-cell font-bold text-[var(--paper)]">{room.code}</span> with your friends so they appear here live!
+              </p>
+            ) : null}
+          </section>
 
-            <div className="expander" data-open={botMenu && isHost}>
-              <div>
-                <div className="mt-4 rounded-2xl bg-[var(--ink-2)] p-3 shadow-[0_0_0_1px_var(--line)]">
-                  <p className="flex items-center gap-2 text-sm font-semibold">
-                    <Bot size={16} className="text-[var(--peri)]" /> Add a practice bot friend
-                  </p>
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    {PERSONALITIES.map((p) => (
-                      <button
-                        key={p.id}
-                        type="button"
-                        onClick={() => {
-                          haptic([6, 30, 6]);
-                          void api.addSimulatedMember(p.id);
-                        }}
-                        className="press rounded-xl bg-[var(--surface-2)] px-3 py-2.5 text-left shadow-[0_0_0_1px_var(--line)] hover:bg-[var(--surface-3)]"
-                      >
-                        <span className="block text-sm font-semibold">{p.label}</span>
-                        <span className="block text-xs text-[var(--muted)]">{p.hint}</span>
-                      </button>
-                    ))}
-                  </div>
-                  <div className="mt-3 flex items-center justify-between gap-3 px-1">
-                    <span className="text-xs text-[var(--muted)]">Bots answer and react on their own</span>
-                    <Toggle
-                      checked={room.autoSimulateBots}
-                      onChange={(v) => void api.updateSettings({ autoSimulateBots: v })}
-                      label="Bots auto-play"
-                    />
-                  </div>
-                </div>
+          {/* Question Studio Card (Prominent when 0 questions loaded) */}
+          <section
+            className="panel rise mt-4 p-4"
+            style={{
+              animationDelay: '100ms',
+              boxShadow: !hasQuestions
+                ? '0 0 0 1.5px var(--lime), 0 18px 40px -24px rgba(215, 255, 63, 0.35)'
+                : undefined,
+            }}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="font-display text-lg font-bold leading-tight [text-wrap:balance]">
+                  {hasQuestions ? room.title : 'Add Exam Questions'}
+                </h2>
+                <p className="mt-1 text-xs text-[var(--muted)] tabular">
+                  {hasQuestions
+                    ? `${room.questions.length} ${
+                        room.questions.length === 1 ? 'question' : 'questions'
+                      } ready · ~${Math.max(
+                        1,
+                        Math.round((room.questions.length * room.timePerQuestion) / 60)
+                      )} min`
+                    : 'No questions loaded yet — paste Markdown or upload a PDF / image'}
+                </p>
               </div>
+              <span
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
+                style={{
+                  background: hasQuestions ? 'var(--surface-2)' : 'rgba(215, 255, 63, 0.16)',
+                  color: hasQuestions ? 'var(--lime)' : 'var(--lime)',
+                }}
+              >
+                {hasQuestions ? <FileText size={18} /> : <FileUp size={18} />}
+              </span>
             </div>
+
+            {hasQuestions && room.questions[0] ? (
+              <div className="mt-3 rounded-xl bg-[var(--ink-2)] px-3 py-2.5 text-[13px] leading-snug text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
+                <span className="font-semibold text-[var(--paper)]">Q1. </span>
+                <Markdown source={room.questions[0].prompt} inline />
+              </div>
+            ) : (
+              <div className="mt-3 rounded-2xl bg-[var(--ink-2)] p-3 text-xs leading-relaxed text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
+                <p className="flex items-center gap-1.5 font-semibold text-[var(--paper)]">
+                  <Sparkles size={14} className="text-[var(--lime)]" /> Supports Markdown, PDFs, Exam Photos &amp; LaTeX Math
+                </p>
+                <p className="mt-1">
+                  Paste structured Markdown for instant parsing, or upload a PDF / screenshot with Gemini Smart Parse to extract questions and LaTeX equations (`$...$`).
+                </p>
+              </div>
+            )}
+
+            <button
+              type="button"
+              className={`mt-3 w-full justify-between ${
+                !hasQuestions ? 'btn-primary h-12 text-sm' : 'btn-secondary'
+              }`}
+              onClick={() => {
+                haptic(6);
+                setStudioOpen(true);
+              }}
+            >
+              <span className="flex items-center gap-2">
+                <FileUp size={17} />
+                {hasQuestions
+                  ? 'Edit or upload new questions (MD / PDF / Image)'
+                  : 'Open Question Studio (MD / PDF / Image)'}
+              </span>
+              <ChevronRight size={18} className={!hasQuestions ? 'text-[var(--ink)]' : 'text-[var(--muted)]'} />
+            </button>
           </section>
 
           {/* Mode selector */}
-          <section className="rise mt-4" style={{ animationDelay: '120ms' }}>
+          <section className="rise mt-4" style={{ animationDelay: '150ms' }}>
             <div className="mb-2.5 flex items-baseline justify-between px-1">
               <h2 className="font-display text-lg font-bold">How we play</h2>
               {!isHost ? <span className="text-xs text-[var(--muted)]">Host decides</span> : null}
@@ -296,17 +309,25 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                   >
                     <span
                       className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[14px]"
-                      style={{ background: active ? m.color : 'var(--surface-3)', color: active ? 'var(--ink)' : m.color }}
+                      style={{
+                        background: active ? m.color : 'var(--surface-3)',
+                        color: active ? 'var(--ink)' : m.color,
+                      }}
                     >
                       <Icon size={20} strokeWidth={2.4} />
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block font-display text-[17px] font-bold">{m.title}</span>
-                      <span className="mt-0.5 block text-[13px] leading-snug text-[var(--muted)]">{m.body}</span>
+                      <span className="mt-0.5 block text-[13px] leading-snug text-[var(--muted)]">
+                        {m.body}
+                      </span>
                     </span>
                     <span
                       className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full"
-                      style={{ boxShadow: active ? 'none' : 'inset 0 0 0 2px var(--line-strong)', background: active ? m.color : 'transparent' }}
+                      style={{
+                        boxShadow: active ? 'none' : 'inset 0 0 0 2px var(--line-strong)',
+                        background: active ? m.color : 'transparent',
+                      }}
                     >
                       {active ? <Check size={13} strokeWidth={3.5} className="text-[var(--ink)]" /> : null}
                     </span>
@@ -336,59 +357,6 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
               ))}
             </div>
           </section>
-
-          {/* Question set */}
-          <section className="panel rise mt-4 p-4" style={{ animationDelay: '180ms' }}>
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <h2 className="font-display text-lg font-bold leading-tight [text-wrap:balance]">{room.title}</h2>
-                <p className="mt-1 text-xs text-[var(--muted)] tabular">
-                  {room.questions.length} questions · about {Math.max(1, Math.round((room.questions.length * room.timePerQuestion) / 60))} min
-                </p>
-              </div>
-              <FileText size={20} className="mt-0.5 shrink-0 text-[var(--muted)]" />
-            </div>
-
-            {room.questions[0] ? (
-              <p className="mt-3 line-clamp-2 rounded-xl bg-[var(--ink-2)] px-3 py-2.5 text-[13px] leading-snug text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
-                <span className="font-semibold text-[var(--paper)]">Q1.</span> {room.questions[0].prompt}
-              </p>
-            ) : null}
-
-            {isHost ? (
-              <>
-                <div className="no-scrollbar -mx-4 mt-3 flex gap-2 overflow-x-auto px-4">
-                  {SAMPLE_EXAM_PACKS.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      className="chip shrink-0"
-                      data-active={currentPackId === p.id}
-                      onClick={() => void loadPack(p.id)}
-                    >
-                      <span aria-hidden>{p.icon}</span>
-                      {p.category}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  className="btn-secondary mt-3 w-full justify-between"
-                  onClick={() => {
-                    haptic(6);
-                    setStudioOpen(true);
-                  }}
-                >
-                  <span className="flex items-center gap-2">
-                    <FileText size={17} /> Paste or upload Markdown
-                  </span>
-                  <ChevronRight size={18} className="text-[var(--muted)]" />
-                </button>
-              </>
-            ) : (
-              <p className="mt-3 text-xs text-[var(--muted)]">The host picks the questions.</p>
-            )}
-          </section>
         </div>
       </div>
 
@@ -398,18 +366,20 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
           <button
             type="button"
             className="btn-primary h-14 w-full text-base"
-            disabled={starting || room.questions.length === 0}
+            disabled={starting || !hasQuestions}
             onClick={start}
           >
             {starting ? <Loader2 size={20} className="animate-spin" /> : <Play size={19} fill="currentColor" />}
-            {room.questions.length === 0
-              ? 'Add questions to start'
+            {!hasQuestions
+              ? 'Add questions above to start'
               : `Start ${room.mode === 'race' ? 'the race' : 'exam'} · ${room.questions.length} Qs`}
           </button>
         ) : (
           <div className="flex h-14 items-center justify-center gap-2.5 rounded-2xl bg-[var(--surface)] text-sm font-medium text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
             <Hourglass size={16} className="text-[var(--lime)]" />
-            Waiting for the host to start
+            {hasQuestions
+              ? `Ready (${room.questions.length} Qs) — Waiting for host to start`
+              : 'Waiting for questions & host to start'}
             <span className="thinking-dots">
               <span />
               <span />

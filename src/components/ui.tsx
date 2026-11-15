@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, type ReactNode } from 'react';
+import katex from 'katex';
 import { Crown, X } from 'lucide-react';
 import type { MemberAnswerTag } from '@/types/exam';
 
@@ -129,29 +130,111 @@ export function MemberTag({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Tiny, safe Markdown renderer (bold, italic, code, fences, lists)            */
+/* Markdown + KaTeX LaTeX renderer                                             */
 /* -------------------------------------------------------------------------- */
 
-const INLINE_RE = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|_[^_\s][^_]*_)/g;
+function renderKatexHtml(latex: string, displayMode: boolean): string {
+  try {
+    return katex.renderToString(latex.trim(), {
+      displayMode,
+      throwOnError: false,
+      strict: 'ignore',
+    });
+  } catch {
+    return latex;
+  }
+}
+
+/**
+ * Tokenizes inline math (`$$...$$`, `\[...\]`, `\(...\)`, `$...$`), code (`` `...` ``),
+ * and bold/italic (`**...**`, `__...__`, `*...*`, `_..._`).
+ * Math is matched BEFORE bold/italic so LaTeX subscripts like `$E_k$` are never mangled.
+ */
+const INLINE_TOKEN_RE =
+  /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$(?!\s)(?:\\.|[^$\n\\])+?(?<!\s)\$|`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*\s][^*]*\*|(?<![a-zA-Z0-9])_[^_\s][^_]*_(?![a-zA-Z0-9]))/g;
 
 function renderInline(text: string, keyBase: string): ReactNode[] {
-  const parts = text.split(INLINE_RE).filter((p) => p !== '');
+  const parts = text.split(INLINE_TOKEN_RE).filter((p) => p !== '');
   return parts.map((part, i) => {
     const key = `${keyBase}-${i}`;
+    // Display math: $$...$$ or \[...\]
+    if (
+      (part.startsWith('$$') && part.endsWith('$$') && part.length > 4) ||
+      (part.startsWith('\\[') && part.endsWith('\\]') && part.length > 4)
+    ) {
+      const expr = part.slice(2, -2);
+      const html = renderKatexHtml(expr, true);
+      return (
+        <span
+          key={key}
+          dir="ltr"
+          className="my-1 block overflow-x-auto"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      );
+    }
+    // Inline math: \(...\)
+    if (part.startsWith('\\(') && part.endsWith('\\)') && part.length > 4) {
+      const expr = part.slice(2, -2);
+      const html = renderKatexHtml(expr, false);
+      return (
+        <span
+          key={key}
+          dir="ltr"
+          className="inline-block align-middle"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      );
+    }
+    // Inline math: $...$
+    if (part.startsWith('$') && part.endsWith('$') && part.length > 2) {
+      const expr = part.slice(1, -1);
+      const html = renderKatexHtml(expr, false);
+      return (
+        <span
+          key={key}
+          dir="ltr"
+          className="inline-block align-middle"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      );
+    }
     if (part.startsWith('`') && part.endsWith('`') && part.length > 1) {
       return <code key={key}>{part.slice(1, -1)}</code>;
     }
-    if ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('__') && part.endsWith('__'))) {
-      return <strong key={key}>{part.slice(2, -2)}</strong>;
+    if (
+      (part.startsWith('**') && part.endsWith('**')) ||
+      (part.startsWith('__') && part.endsWith('__'))
+    ) {
+      return <strong key={key}>{renderInline(part.slice(2, -2), `${key}-b`)}</strong>;
     }
-    if ((part.startsWith('*') && part.endsWith('*')) || (part.startsWith('_') && part.endsWith('_'))) {
-      if (part.length > 2) return <em key={key}>{part.slice(1, -1)}</em>;
+    if (
+      (part.startsWith('*') && part.endsWith('*')) ||
+      (part.startsWith('_') && part.endsWith('_'))
+    ) {
+      if (part.length > 2) return <em key={key}>{renderInline(part.slice(1, -1), `${key}-i`)}</em>;
     }
     return <span key={key}>{part}</span>;
   });
 }
 
-export function Markdown({ source, className = '' }: { source: string; className?: string }) {
+export function Markdown({
+  source,
+  className = '',
+  inline = false,
+}: {
+  source: string;
+  className?: string;
+  inline?: boolean;
+}) {
+  if (inline) {
+    return (
+      <span dir="auto" className={`md ${className}`}>
+        {renderInline(source || '', 'inl')}
+      </span>
+    );
+  }
+
   const lines = (source || '').replace(/\r\n/g, '\n').split('\n');
   const blocks: ReactNode[] = [];
   let i = 0;
@@ -159,6 +242,8 @@ export function Markdown({ source, className = '' }: { source: string; className
 
   while (i < lines.length) {
     const line = lines[i];
+
+    // Fenced code blocks
     if (line.trim().startsWith('```')) {
       const code: string[] = [];
       i++;
@@ -168,12 +253,37 @@ export function Markdown({ source, className = '' }: { source: string; className
       }
       i++;
       blocks.push(
-        <pre key={`b${k++}`}>
+        <pre key={`b${k++}`} dir="ltr">
           <code>{code.join('\n')}</code>
         </pre>
       );
       continue;
     }
+
+    // Multi-line $$...$$ display math block
+    if (line.trim().startsWith('$$') && !line.trim().slice(2).includes('$$')) {
+      const mathLines: string[] = [line.trim().slice(2)];
+      i++;
+      while (i < lines.length && !lines[i].includes('$$')) {
+        mathLines.push(lines[i]);
+        i++;
+      }
+      if (i < lines.length) {
+        mathLines.push(lines[i].replace(/\$\$.*$/, ''));
+        i++;
+      }
+      const html = renderKatexHtml(mathLines.join('\n'), true);
+      blocks.push(
+        <div
+          key={`b${k++}`}
+          dir="ltr"
+          className="my-2 overflow-x-auto"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
+      );
+      continue;
+    }
+
     if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) {
       const items: string[] = [];
       while (i < lines.length && /^\s*([-*+]|\d+[.)])\s+/.test(lines[i])) {
@@ -182,7 +292,7 @@ export function Markdown({ source, className = '' }: { source: string; className
       }
       const bk = `b${k++}`;
       blocks.push(
-        <ul key={bk}>
+        <ul key={bk} dir="auto">
           {items.map((it, j) => (
             <li key={`${bk}-${j}`}>{renderInline(it, `${bk}-${j}`)}</li>
           ))}
@@ -205,10 +315,18 @@ export function Markdown({ source, className = '' }: { source: string; className
       i++;
     }
     const bk = `b${k++}`;
-    blocks.push(<p key={bk}>{renderInline(para.join(' '), bk)}</p>);
+    blocks.push(
+      <p key={bk} dir="auto">
+        {renderInline(para.join(' '), bk)}
+      </p>
+    );
   }
 
-  return <div className={`md ${className}`}>{blocks}</div>;
+  return (
+    <div dir="auto" className={`md ${className}`}>
+      {blocks}
+    </div>
+  );
 }
 
 /* -------------------------------------------------------------------------- */

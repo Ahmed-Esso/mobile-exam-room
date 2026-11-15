@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { Bricolage_Grotesque, Figtree, JetBrains_Mono } from 'next/font/google';
+import 'katex/dist/katex.min.css';
 import './globals.css';
 
 const display = Bricolage_Grotesque({

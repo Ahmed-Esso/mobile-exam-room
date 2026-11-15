@@ -6,43 +6,313 @@ import {
   Question,
   RoomSettingsUpdate,
   RoomState,
+  RoomStatus,
   SendReactionInput,
 } from '@/types/exam';
-import { DEFAULT_QUESTIONS, DEFAULT_SAMPLE_PACK } from './sample-exams';
-
-const BOT_ROSTER: Array<{
-  name: string;
-  avatar: string;
-  personality: NonNullable<Member['botPersonality']>;
-}> = [
-  { name: 'Sara', avatar: '🐼', personality: 'genius' },
-  { name: 'Omar', avatar: '🦁', personality: 'speedster' },
-  { name: 'Maya', avatar: '🐸', personality: 'careful' },
-  { name: 'Leo', avatar: '🦉', personality: 'genius' },
-  { name: 'Zara', avatar: '🐙', personality: 'wildcard' },
-  { name: 'Kai', avatar: '🐯', personality: 'speedster' },
-  { name: 'Chloe', avatar: '🦄', personality: 'careful' },
-  { name: 'Max', avatar: '🦖', personality: 'wildcard' },
-];
 
 interface GlobalRoomStore {
   rooms: Map<string, RoomState>;
-  /** Keyed by `${roomCode}:${questionIndex}:${botId}` -> scheduled delay ms */
-  botSchedules: Map<string, { delayMs: number; optionIndex: number; reacted?: boolean }>;
 }
 
 const globalForRooms = globalThis as unknown as {
-  __examRoomStore?: GlobalRoomStore;
+  __examRoomStoreV2?: GlobalRoomStore;
 };
 
-function getStore(): GlobalRoomStore {
-  if (!globalForRooms.__examRoomStore) {
-    globalForRooms.__examRoomStore = {
-      rooms: new Map<string, RoomState>(),
-      botSchedules: new Map(),
-    };
+const TMP_STORE_PATH = '/tmp/exam-rooms-v2.json';
+
+function loadDiskRooms(): Record<string, RoomState> {
+  if (typeof window !== 'undefined') return {};
+  try {
+    const req = eval('require') as NodeRequire;
+    const fs = req('fs');
+    if (fs.existsSync(TMP_STORE_PATH)) {
+      const raw = fs.readFileSync(TMP_STORE_PATH, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return parsed as Record<string, RoomState>;
+      }
+    }
+  } catch {
+    // Ignore disk read errors
   }
-  return globalForRooms.__examRoomStore;
+  return {};
+}
+
+function saveDiskRooms(rooms: Map<string, RoomState>) {
+  if (typeof window !== 'undefined') return;
+  try {
+    const req = eval('require') as NodeRequire;
+    const fs = req('fs');
+    const obj: Record<string, RoomState> = {};
+    for (const [k, v] of Array.from(rooms.entries())) {
+      obj[k] = v;
+    }
+    fs.writeFileSync(TMP_STORE_PATH, JSON.stringify(obj), 'utf8');
+  } catch {
+    // Ignore disk write errors
+  }
+}
+
+function getStore(): GlobalRoomStore {
+  if (!globalForRooms.__examRoomStoreV2) {
+    const rooms = new Map<string, RoomState>();
+    const disk = loadDiskRooms();
+    for (const [code, room] of Object.entries(disk)) {
+      rooms.set(code, room);
+    }
+    globalForRooms.__examRoomStoreV2 = { rooms };
+  } else if (typeof window === 'undefined') {
+    // Merge any updates written to /tmp by sibling invocations on this container
+    const disk = loadDiskRooms();
+    for (const [code, diskRoom] of Object.entries(disk)) {
+      const existing = globalForRooms.__examRoomStoreV2.rooms.get(code);
+      if (!existing) {
+        globalForRooms.__examRoomStoreV2.rooms.set(code, diskRoom);
+      } else {
+        globalForRooms.__examRoomStoreV2.rooms.set(
+          code,
+          mergeRoomStates(existing, diskRoom)
+        );
+      }
+    }
+  }
+  return globalForRooms.__examRoomStoreV2;
+}
+
+function recomputeMemberStats(member: Member, questions: Question[]): Member {
+  let score = 0;
+  let streak = 0;
+  let bestStreak = 0;
+  let correctCount = 0;
+  let totalTimeMs = 0;
+
+  const sortedIndices = Object.keys(member.answers)
+    .map((k) => Number(k))
+    .filter((k) => Number.isFinite(k))
+    .sort((a, b) => a - b);
+
+  for (const qIdx of sortedIndices) {
+    const ans = member.answers[qIdx];
+    if (!ans) continue;
+    const q = questions[qIdx];
+    const isCorrect = q ? ans.optionIndex === q.correctIndex : ans.isCorrect;
+    ans.isCorrect = isCorrect;
+    totalTimeMs += ans.timeMs || 0;
+    if (isCorrect) {
+      score += ans.pointsEarned || 1000;
+      correctCount += 1;
+      streak += 1;
+      bestStreak = Math.max(bestStreak, streak);
+    } else {
+      ans.pointsEarned = 0;
+      ans.speedBonus = 0;
+      streak = 0;
+    }
+  }
+
+  return {
+    ...member,
+    score,
+    streak,
+    bestStreak,
+    correctCount,
+    totalTimeMs,
+  };
+}
+
+const STATUS_RANK: Record<RoomStatus, number> = {
+  lobby: 0,
+  active: 1,
+  finished: 2,
+};
+
+/**
+ * Deterministic CRDT-style room state merger.
+ * Works identically on both server and client so multi-phone rooms across
+ * Vercel serverless instances and MQTT WebSockets never drop members or reveal early in Wait Mode.
+ */
+export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
+  if (!a) return b;
+  if (!b) return a;
+  if (a.code !== b.code) return b;
+
+  const sessionA = a.examSessionId || a.createdAt || 0;
+  const sessionB = b.examSessionId || b.createdAt || 0;
+  const latestSessionId = Math.max(sessionA, sessionB);
+  const sameSession = sessionA === sessionB;
+
+  // Primary state for room-level settings is the one with newer session or higher version/updatedAt
+  const primary =
+    sessionB > sessionA
+      ? b
+      : sessionA > sessionB
+      ? a
+      : b.version > a.version ||
+        (b.version === a.version && b.updatedAt >= a.updatedAt)
+      ? b
+      : a;
+
+  // Kicked member IDs union
+  const kickedSet = new Set<string>([
+    ...(a.kickedMemberIds || []),
+    ...(b.kickedMemberIds || []),
+  ]);
+
+  // Questions: prefer newer questionsUpdatedAt, or non-empty questions array
+  const qTimeA = a.questionsUpdatedAt || (a.questions.length > 0 ? a.updatedAt : 0);
+  const qTimeB = b.questionsUpdatedAt || (b.questions.length > 0 ? b.updatedAt : 0);
+  const useQuestionsB =
+    (b.questions.length > 0 && a.questions.length === 0) ||
+    (b.questions.length > 0 && qTimeB > qTimeA);
+  const mergedQuestions = useQuestionsB ? b.questions : a.questions;
+  const mergedQuestionsUpdatedAt = Math.max(qTimeA, qTimeB);
+
+  // Determine authoritative hostId (prefer a member explicitly marked isHost: true)
+  const hostFromA = a.members.find((m) => m.isHost)?.id;
+  const hostFromB = b.members.find((m) => m.isHost)?.id;
+  const mergedHostId = hostFromA || hostFromB || a.hostId || b.hostId;
+
+  // Union of members by member.id (never drop a joined friend unless explicitly kicked)
+  const memberMap = new Map<string, Member>();
+  for (const m of a.members) {
+    if (!kickedSet.has(m.id)) {
+      memberMap.set(m.id, {
+        ...m,
+        answers: sessionA === latestSessionId ? { ...m.answers } : {},
+      });
+    }
+  }
+
+  for (const mB of b.members) {
+    if (kickedSet.has(mB.id)) continue;
+    const mA = memberMap.get(mB.id);
+    const bAnswers = sessionB === latestSessionId ? { ...mB.answers } : {};
+
+    if (!mA) {
+      memberMap.set(mB.id, {
+        ...mB,
+        answers: bAnswers,
+      });
+    } else {
+      const mergedAnswers: Record<number, MemberAnswer> = { ...mA.answers };
+      for (const [qKey, ansB] of Object.entries(bAnswers)) {
+        const qIdx = Number(qKey);
+        const existingAns = mergedAnswers[qIdx];
+        if (
+          !existingAns ||
+          (ansB && ansB.answeredAt < existingAns.answeredAt)
+        ) {
+          mergedAnswers[qIdx] = ansB;
+        }
+      }
+
+      const newerMeta = mB.lastSeenAt >= mA.lastSeenAt ? mB : mA;
+      memberMap.set(mB.id, {
+        ...newerMeta,
+        id: mB.id,
+        name: newerMeta.name || mA.name || mB.name,
+        avatar: newerMeta.avatar || mA.avatar || mB.avatar,
+        isHost: mA.isHost || mB.isHost || mB.id === mergedHostId,
+        statusBadge: newerMeta.statusBadge,
+        joinedAt: Math.min(mA.joinedAt || Date.now(), mB.joinedAt || Date.now()),
+        lastSeenAt: Math.max(mA.lastSeenAt || 0, mB.lastSeenAt || 0),
+        answers: mergedAnswers,
+      });
+    }
+  }
+
+  // Sort members: host first, then by joinedAt
+  const mergedMembers = Array.from(memberMap.values())
+    .map((m) => ({
+      ...recomputeMemberStats(m, mergedQuestions),
+      isHost: m.id === mergedHostId || m.isHost,
+    }))
+    .sort((x, y) => {
+      if (x.isHost !== y.isHost) return x.isHost ? -1 : 1;
+      return x.joinedAt - y.joinedAt;
+    });
+
+  // Status & currentQuestionIndex resolution
+  let mergedStatus: RoomStatus = primary.status;
+  let mergedQuestionIndex = primary.currentQuestionIndex;
+  let mergedQuestionStartedAt = primary.questionStartedAt;
+  let mergedForceRevealed = primary.forceRevealedQuestionIndex ?? -1;
+
+  if (sameSession) {
+    mergedStatus =
+      STATUS_RANK[b.status] > STATUS_RANK[a.status] ? b.status : a.status;
+    if (mergedStatus === 'active') {
+      if (b.currentQuestionIndex > a.currentQuestionIndex) {
+        mergedQuestionIndex = b.currentQuestionIndex;
+        mergedQuestionStartedAt = b.questionStartedAt;
+      } else if (a.currentQuestionIndex > b.currentQuestionIndex) {
+        mergedQuestionIndex = a.currentQuestionIndex;
+        mergedQuestionStartedAt = a.questionStartedAt;
+      } else {
+        mergedQuestionIndex = a.currentQuestionIndex;
+        mergedQuestionStartedAt = Math.min(
+          a.questionStartedAt || Date.now(),
+          b.questionStartedAt || Date.now()
+        );
+      }
+    }
+    mergedForceRevealed = Math.max(
+      a.forceRevealedQuestionIndex ?? -1,
+      b.forceRevealedQuestionIndex ?? -1
+    );
+  }
+
+  // Merge reactions by id
+  const reactionMap = new Map<string, EmojiReaction>();
+  for (const rx of [...(a.reactions || []), ...(b.reactions || [])]) {
+    if (rx && rx.id) {
+      reactionMap.set(rx.id, rx);
+    }
+  }
+  const mergedReactions = Array.from(reactionMap.values())
+    .sort((x, y) => x.createdAt - y.createdAt)
+    .slice(-40);
+
+  // Strict Wait-Mode & Race-Mode Reveal Calculation
+  const allAnswered =
+    mergedMembers.length > 0 &&
+    mergedMembers.every((m) => m.answers[mergedQuestionIndex] !== undefined);
+  const isForceRevealed = mergedForceRevealed === mergedQuestionIndex;
+
+  let mergedIsRevealed = false;
+  if (mergedStatus === 'finished') {
+    mergedIsRevealed = true;
+  } else if (mergedStatus === 'active') {
+    // Strictly require either explicit host Force Reveal on this question OR every member in the room having answered
+    mergedIsRevealed = isForceRevealed || allAnswered;
+  }
+
+  return {
+    code: a.code,
+    title:
+      primary.title && primary.title !== 'Live Exam Room'
+        ? primary.title
+        : b.title !== 'Live Exam Room'
+        ? b.title
+        : a.title || 'Live Exam Room',
+    status: mergedStatus,
+    mode: primary.mode,
+    timePerQuestion: primary.timePerQuestion || 30,
+    hostId: mergedHostId || (mergedMembers[0]?.id ?? ''),
+    currentQuestionIndex: mergedQuestionIndex,
+    questionStartedAt: mergedQuestionStartedAt,
+    examSessionId: latestSessionId,
+    forceRevealedQuestionIndex: mergedForceRevealed,
+    questionsUpdatedAt: mergedQuestionsUpdatedAt,
+    kickedMemberIds: Array.from(kickedSet),
+    isRevealed: mergedIsRevealed,
+    questions: mergedQuestions,
+    members: mergedMembers,
+    reactions: mergedReactions,
+    version: Math.max(a.version || 1, b.version || 1),
+    createdAt: Math.min(a.createdAt || Date.now(), b.createdAt || Date.now()),
+    updatedAt: Math.max(a.updatedAt || Date.now(), b.updatedAt || Date.now()),
+  };
 }
 
 function generateRoomCode(): string {
@@ -63,11 +333,16 @@ function generateRoomCode(): string {
 function pruneOldRooms() {
   const store = getStore();
   const now = Date.now();
-  const maxAgeMs = 1000 * 60 * 60 * 4; // 4 hours
+  const maxAgeMs = 1000 * 60 * 60 * 6; // 6 hours
+  let changed = false;
   for (const [code, room] of Array.from(store.rooms.entries())) {
     if (now - room.updatedAt > maxAgeMs) {
       store.rooms.delete(code);
+      changed = true;
     }
+  }
+  if (changed) {
+    saveDiskRooms(store.rooms);
   }
 }
 
@@ -86,7 +361,6 @@ function computePoints(
   const maxTimeMs = (room.timePerQuestion || 30) * 1000;
   const timeRatio = Math.max(0, Math.min(1, 1 - timeMs / maxTimeMs));
 
-  // Count how many members already answered this question correctly before this member
   const priorCorrectCount = room.members.filter((m) => {
     if (m.id === member.id) return false;
     const ans = m.answers[questionIndex];
@@ -106,7 +380,6 @@ function computePoints(
     const timeBonus = Math.round(timeRatio * 300);
     speedBonus = rankBonus + timeBonus;
   } else {
-    // Wait mode still rewards quick lock-in + streak bonus
     const timeBonus = Math.round(timeRatio * 250);
     const streakBonus = Math.min(400, member.streak * 100);
     speedBonus = timeBonus + streakBonus;
@@ -128,7 +401,6 @@ function recordMemberAnswerInternal(
   const currentQ = room.questions[qIdx];
   if (!currentQ) return false;
 
-  // Already answered this question
   if (member.answers[qIdx] !== undefined) {
     return false;
   }
@@ -167,149 +439,15 @@ function recordMemberAnswerInternal(
     member.streak = 0;
   }
 
-  // Check if all members have answered
   const allAnswered =
     room.members.length > 0 &&
     room.members.every((m) => m.answers[qIdx] !== undefined);
 
-  if (allAnswered && !room.isRevealed) {
-    room.isRevealed = true;
-  }
-
+  room.isRevealed =
+    room.forceRevealedQuestionIndex === qIdx || allAnswered;
   room.version += 1;
   room.updatedAt = Date.now();
   return true;
-}
-
-function getOrCreateBotSchedule(
-  room: RoomState,
-  bot: Member,
-  questionIndex: number
-): { delayMs: number; optionIndex: number; reacted?: boolean } {
-  const store = getStore();
-  const key = `${room.code}:${questionIndex}:${bot.id}`;
-  const existing = store.botSchedules.get(key);
-  if (existing) return existing;
-
-  const q = room.questions[questionIndex];
-  const numOptions = q ? q.options.length : 4;
-  const correctIdx = q ? q.correctIndex : 0;
-
-  let accuracy = 0.72;
-  let minDelay = 2000;
-  let maxDelay = 6200;
-
-  switch (bot.botPersonality) {
-    case 'genius':
-      accuracy = 0.88;
-      minDelay = 2400;
-      maxDelay = 5200;
-      break;
-    case 'speedster':
-      accuracy = 0.7;
-      minDelay = 1300;
-      maxDelay = 3500;
-      break;
-    case 'careful':
-      accuracy = 0.82;
-      minDelay = 3200;
-      maxDelay = 6800;
-      break;
-    case 'wildcard':
-      accuracy = 0.58;
-      minDelay = 1600;
-      maxDelay = 5800;
-      break;
-  }
-
-  const willBeCorrect = Math.random() < accuracy;
-  let chosenOption = correctIdx;
-  if (!willBeCorrect && numOptions > 1) {
-    const wrongOptions = Array.from({ length: numOptions }, (_, i) => i).filter(
-      (i) => i !== correctIdx
-    );
-    chosenOption = wrongOptions[Math.floor(Math.random() * wrongOptions.length)];
-  }
-
-  const delayMs = Math.floor(minDelay + Math.random() * (maxDelay - minDelay));
-  const schedule = { delayMs, optionIndex: chosenOption, reacted: false };
-  store.botSchedules.set(key, schedule);
-  return schedule;
-}
-
-/**
- * Advances simulated bot answers & contextual reactions based on elapsed wall-clock time.
- * Called automatically whenever a room is read or mutated.
- */
-export function tickRoomSimulation(room: RoomState): RoomState {
-  if (room.status !== 'active' || !room.autoSimulateBots) {
-    return room;
-  }
-
-  const now = Date.now();
-  const qIdx = room.currentQuestionIndex;
-  const elapsed = now - room.questionStartedAt;
-  const bots = room.members.filter((m) => m.isBot);
-
-  if (bots.length === 0) return room;
-
-  for (const bot of bots) {
-    const sched = getOrCreateBotSchedule(room, bot, qIdx);
-    if (bot.answers[qIdx] === undefined && elapsed >= sched.delayMs) {
-      const answeredAt = room.questionStartedAt + sched.delayMs;
-      recordMemberAnswerInternal(room, bot, sched.optionIndex, answeredAt);
-    }
-  }
-
-  // If question is revealed (or in race mode after a human answers), let one bot occasionally send a fun reaction
-  const humans = room.members.filter((m) => !m.isBot);
-  const humanAnswered = humans.find((h) => h.answers[qIdx] !== undefined);
-
-  if (humanAnswered && (room.isRevealed || room.mode === 'race')) {
-    const humanAns = humanAnswered.answers[qIdx];
-    for (const bot of bots) {
-      const sched = getOrCreateBotSchedule(room, bot, qIdx);
-      const botAns = bot.answers[qIdx];
-      if (!botAns || sched.reacted) continue;
-
-      // Mark as considered so we only trigger once per question per bot
-      sched.reacted = true;
-
-      // 45% chance for a bot to send a contextual or celebratory reaction
-      if (Math.random() < 0.45) {
-        if (humanAns.isCorrect && !botAns.isCorrect) {
-          const choices = [
-            { emoji: '💀', label: 'How?!' },
-            { emoji: '🫡', label: 'Teach me' },
-            { emoji: '🧠', label: 'Big brain' },
-          ];
-          const pick = choices[Math.floor(Math.random() * choices.length)];
-          pushReactionInternal(room, bot, {
-            emoji: pick.emoji,
-            label: pick.label,
-            kind: 'contextual-wrong-right',
-            targetMemberId: humanAnswered.id,
-            questionIndex: qIdx,
-          });
-        } else if (humanAns.isCorrect && botAns.isCorrect) {
-          const choices = [
-            { emoji: '🤝', label: 'Twin brain!' },
-            { emoji: '🔥', label: 'We cooked' },
-          ];
-          const pick = choices[Math.floor(Math.random() * choices.length)];
-          pushReactionInternal(room, bot, {
-            emoji: pick.emoji,
-            label: pick.label,
-            kind: 'contextual-both-right',
-            targetMemberId: humanAnswered.id,
-            questionIndex: qIdx,
-          });
-        }
-      }
-    }
-  }
-
-  return room;
 }
 
 function pushReactionInternal(
@@ -348,46 +486,12 @@ function pushReactionInternal(
   return reaction;
 }
 
-function createBotMember(
-  room: RoomState,
-  personalityOverride?: Member['botPersonality']
-): Member {
-  const existingNames = new Set(room.members.map((m) => m.name.toLowerCase()));
-  const candidate =
-    BOT_ROSTER.find((b) => !existingNames.has(b.name.toLowerCase())) ||
-    BOT_ROSTER[Math.floor(Math.random() * BOT_ROSTER.length)];
-
-  const suffix = existingNames.has(candidate.name.toLowerCase())
-    ? ` ${room.members.filter((m) => m.isBot).length + 1}`
-    : '';
-
-  const now = Date.now();
-  return {
-    id: `bot-${now}-${Math.random().toString(36).slice(2, 7)}`,
-    name: `${candidate.name}${suffix}`,
-    avatar: candidate.avatar,
-    isHost: false,
-    isBot: true,
-    botPersonality: personalityOverride || candidate.personality,
-    score: 0,
-    streak: 0,
-    bestStreak: 0,
-    correctCount: 0,
-    totalTimeMs: 0,
-    statusBadge: null,
-    joinedAt: now,
-    lastSeenAt: now,
-    answers: {},
-  };
-}
-
 export function createRoomInStore(params: {
   memberId: string;
   name: string;
   avatar: string;
   title?: string;
   mode?: GameMode;
-  withBots?: boolean;
 }): RoomState {
   pruneOldRooms();
   const store = getStore();
@@ -397,9 +501,8 @@ export function createRoomInStore(params: {
   const hostMember: Member = {
     id: params.memberId,
     name: params.name.trim() || 'Player 1',
-    avatar: params.avatar || '🦊',
+    avatar: params.avatar || '🐥',
     isHost: true,
-    isBot: false,
     score: 0,
     streak: 0,
     bestStreak: 0,
@@ -413,16 +516,19 @@ export function createRoomInStore(params: {
 
   const room: RoomState = {
     code,
-    title: params.title?.trim() || DEFAULT_SAMPLE_PACK.title,
+    title: params.title?.trim() || 'Live Exam Room',
     status: 'lobby',
     mode: params.mode || 'wait',
     timePerQuestion: 30,
-    autoSimulateBots: true,
     hostId: hostMember.id,
     currentQuestionIndex: 0,
     questionStartedAt: now,
+    examSessionId: now,
+    forceRevealedQuestionIndex: -1,
+    questionsUpdatedAt: 0,
+    kickedMemberIds: [],
     isRevealed: false,
-    questions: [...DEFAULT_QUESTIONS],
+    questions: [],
     members: [hostMember],
     reactions: [],
     version: 1,
@@ -430,21 +536,15 @@ export function createRoomInStore(params: {
     updatedAt: now,
   };
 
-  if (params.withBots !== false) {
-    room.members.push(createBotMember(room, 'genius'));
-    room.members.push(createBotMember(room, 'speedster'));
-  }
-
   store.rooms.set(code, room);
+  saveDiskRooms(store.rooms);
   return room;
 }
 
 export function getRoomFromStore(code: string): RoomState | null {
   const store = getStore();
   const cleanCode = code.trim().toUpperCase();
-  const room = store.rooms.get(cleanCode);
-  if (!room) return null;
-  return tickRoomSimulation(room);
+  return store.rooms.get(cleanCode) || null;
 }
 
 export function joinRoomInStore(params: {
@@ -455,10 +555,62 @@ export function joinRoomInStore(params: {
 }): RoomState | null {
   const store = getStore();
   const cleanCode = params.code.trim().toUpperCase();
-  const room = store.rooms.get(cleanCode);
-  if (!room) return null;
+  if (!cleanCode || cleanCode.length < 4) return null;
 
   const now = Date.now();
+  let room = store.rooms.get(cleanCode);
+
+  if (!room) {
+    // If joining on a different serverless lambda instance before state syncs,
+    // create a joinable room stub so the joining peer immediately connects via MQTT & syncs with the host
+    const joiningMember: Member = {
+      id: params.memberId,
+      name: params.name.trim() || 'Player',
+      avatar: params.avatar || '🐥',
+      isHost: false,
+      score: 0,
+      streak: 0,
+      bestStreak: 0,
+      correctCount: 0,
+      totalTimeMs: 0,
+      statusBadge: null,
+      joinedAt: now,
+      lastSeenAt: now,
+      answers: {},
+    };
+    room = {
+      code: cleanCode,
+      title: 'Live Exam Room',
+      status: 'lobby',
+      mode: 'wait',
+      timePerQuestion: 30,
+      hostId: '',
+      currentQuestionIndex: 0,
+      questionStartedAt: now,
+      examSessionId: 0,
+      forceRevealedQuestionIndex: -1,
+      questionsUpdatedAt: 0,
+      kickedMemberIds: [],
+      isRevealed: false,
+      questions: [],
+      members: [joiningMember],
+      reactions: [],
+      version: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.rooms.set(cleanCode, room);
+    saveDiskRooms(store.rooms);
+    return room;
+  }
+
+  // Ensure member is removed from kickedMemberIds if rejoining
+  if (room.kickedMemberIds?.includes(params.memberId)) {
+    room.kickedMemberIds = room.kickedMemberIds.filter(
+      (id) => id !== params.memberId
+    );
+  }
+
   const existing = room.members.find((m) => m.id === params.memberId);
   if (existing) {
     existing.name = params.name.trim() || existing.name;
@@ -468,9 +620,8 @@ export function joinRoomInStore(params: {
     const newMember: Member = {
       id: params.memberId,
       name: params.name.trim() || `Player ${room.members.length + 1}`,
-      avatar: params.avatar || '🐼',
+      avatar: params.avatar || '🐥',
       isHost: false,
-      isBot: false,
       score: 0,
       streak: 0,
       bestStreak: 0,
@@ -484,9 +635,21 @@ export function joinRoomInStore(params: {
     room.members.push(newMember);
   }
 
+  // Re-evaluate reveal state when a new member joins an active Wait-mode question
+  if (room.status === 'active') {
+    const qIdx = room.currentQuestionIndex;
+    const allAnswered =
+      room.members.length > 0 &&
+      room.members.every((m) => m.answers[qIdx] !== undefined);
+    room.isRevealed =
+      room.forceRevealedQuestionIndex === qIdx || allAnswered;
+  }
+
   room.version += 1;
   room.updatedAt = now;
-  return tickRoomSimulation(room);
+  store.rooms.set(cleanCode, room);
+  saveDiskRooms(store.rooms);
+  return room;
 }
 
 export function mutateRoomInStore(
@@ -497,13 +660,15 @@ export function mutateRoomInStore(
   const store = getStore();
   const cleanCode = code.trim().toUpperCase();
   let room = store.rooms.get(cleanCode);
-  if (!room && payload.fallbackRoom && typeof payload.fallbackRoom === 'object') {
-    const hydrated = payload.fallbackRoom as RoomState;
-    if (hydrated.code === cleanCode && Array.isArray(hydrated.members)) {
-      store.rooms.set(cleanCode, hydrated);
-      room = hydrated;
+
+  if (payload.fallbackRoom && typeof payload.fallbackRoom === 'object') {
+    const clientRoom = payload.fallbackRoom as RoomState;
+    if (clientRoom.code === cleanCode && Array.isArray(clientRoom.members)) {
+      room = room ? mergeRoomStates(room, clientRoom) : clientRoom;
+      store.rooms.set(cleanCode, room);
     }
   }
+
   if (!room) return null;
 
   const now = Date.now();
@@ -511,6 +676,11 @@ export function mutateRoomInStore(
   const actingMember = room.members.find((m) => m.id === memberId);
   if (actingMember) {
     actingMember.lastSeenAt = now;
+  }
+
+  if (action === 'sync') {
+    saveDiskRooms(store.rooms);
+    return room;
   }
 
   switch (action) {
@@ -525,9 +695,6 @@ export function mutateRoomInStore(
       if (typeof settings.timePerQuestion === 'number') {
         room.timePerQuestion = Math.max(5, Math.min(180, settings.timePerQuestion));
       }
-      if (typeof settings.autoSimulateBots === 'boolean') {
-        room.autoSimulateBots = settings.autoSimulateBots;
-      }
       room.version += 1;
       room.updatedAt = now;
       break;
@@ -535,12 +702,14 @@ export function mutateRoomInStore(
 
     case 'setQuestions': {
       const questions = payload.questions as Question[];
-      if (Array.isArray(questions) && questions.length > 0) {
+      if (Array.isArray(questions)) {
         room.questions = questions;
+        room.questionsUpdatedAt = now;
         if (typeof payload.title === 'string' && payload.title.trim()) {
           room.title = payload.title.trim();
         }
         room.currentQuestionIndex = 0;
+        room.forceRevealedQuestionIndex = -1;
         room.isRevealed = false;
         room.version += 1;
         room.updatedAt = now;
@@ -549,12 +718,17 @@ export function mutateRoomInStore(
     }
 
     case 'startExam': {
+      if (room.questions.length === 0) {
+        break;
+      }
       if (payload.mode === 'wait' || payload.mode === 'race') {
         room.mode = payload.mode;
       }
       room.status = 'active';
       room.currentQuestionIndex = 0;
       room.questionStartedAt = now;
+      room.examSessionId = now;
+      room.forceRevealedQuestionIndex = -1;
       room.isRevealed = false;
       room.reactions = [];
       for (const m of room.members) {
@@ -564,12 +738,6 @@ export function mutateRoomInStore(
         m.correctCount = 0;
         m.totalTimeMs = 0;
         m.answers = {};
-      }
-      // Clear previous bot schedules for this room
-      for (const k of Array.from(store.botSchedules.keys())) {
-        if (k.startsWith(`${room.code}:`)) {
-          store.botSchedules.delete(k);
-        }
       }
       room.version += 1;
       room.updatedAt = now;
@@ -586,14 +754,7 @@ export function mutateRoomInStore(
 
     case 'revealQuestion': {
       if (room.status === 'active') {
-        const qIdx = room.currentQuestionIndex;
-        // Have any unanswered bots lock in their scheduled choice immediately
-        for (const m of room.members) {
-          if (m.isBot && m.answers[qIdx] === undefined) {
-            const sched = getOrCreateBotSchedule(room, m, qIdx);
-            recordMemberAnswerInternal(room, m, sched.optionIndex, now);
-          }
-        }
+        room.forceRevealedQuestionIndex = room.currentQuestionIndex;
         room.isRevealed = true;
         room.version += 1;
         room.updatedAt = now;
@@ -606,6 +767,7 @@ export function mutateRoomInStore(
         if (room.currentQuestionIndex + 1 < room.questions.length) {
           room.currentQuestionIndex += 1;
           room.questionStartedAt = now;
+          room.forceRevealedQuestionIndex = -1;
           room.isRevealed = false;
         } else {
           room.status = 'finished';
@@ -622,6 +784,8 @@ export function mutateRoomInStore(
       room.status = backToLobby ? 'lobby' : 'active';
       room.currentQuestionIndex = 0;
       room.questionStartedAt = now;
+      room.examSessionId = now;
+      room.forceRevealedQuestionIndex = -1;
       room.isRevealed = false;
       room.reactions = [];
       for (const m of room.members) {
@@ -631,11 +795,6 @@ export function mutateRoomInStore(
         m.correctCount = 0;
         m.totalTimeMs = 0;
         m.answers = {};
-      }
-      for (const k of Array.from(store.botSchedules.keys())) {
-        if (k.startsWith(`${room.code}:`)) {
-          store.botSchedules.delete(k);
-        }
       }
       room.version += 1;
       room.updatedAt = now;
@@ -673,20 +832,13 @@ export function mutateRoomInStore(
       break;
     }
 
-    case 'addSimulatedMember': {
-      const personality = payload.personality as Member['botPersonality'];
-      const bot = createBotMember(room, personality);
-      room.members.push(bot);
-      room.version += 1;
-      room.updatedAt = now;
-      break;
-    }
-
     case 'removeMember': {
       const targetId = String(payload.targetMemberId || '');
       if (targetId && room.members.length > 1) {
+        room.kickedMemberIds = Array.from(
+          new Set([...(room.kickedMemberIds || []), targetId])
+        );
         room.members = room.members.filter((m) => m.id !== targetId);
-        // Check if all remaining members have answered current question
         const qIdx = room.currentQuestionIndex;
         if (
           room.status === 'active' &&
@@ -702,5 +854,7 @@ export function mutateRoomInStore(
     }
   }
 
-  return tickRoomSimulation(room);
+  store.rooms.set(cleanCode, room);
+  saveDiskRooms(store.rooms);
+  return room;
 }

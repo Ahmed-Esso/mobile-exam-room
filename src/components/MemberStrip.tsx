@@ -21,7 +21,7 @@ export default function MemberStrip({
       {leaderboard.map((m, rank) => {
         const ans = m.answers[qIdx];
         const isMe = m.id === meId;
-        const showResult = !!ans && (room.isRevealed || (room.mode === 'race' && revealedToMe));
+        const showResult = !!ans && revealedToMe;
         let ring: AvatarRing = 'thinking';
         let status: React.ReactNode;
 

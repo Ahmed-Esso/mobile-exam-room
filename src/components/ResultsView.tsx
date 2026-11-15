@@ -100,7 +100,6 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
           name: m.name,
           avatar: m.avatar,
           isMe: m.id === me?.id,
-          isBot: m.isBot,
           optionIndex: optIdx,
           isCorrect: ans.isCorrect,
           timeMs: ans.timeMs,
@@ -422,7 +421,7 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
                           )}
                         </div>
                         <h3 className="mt-1 font-display text-[16px] font-bold leading-snug text-[var(--paper)]">
-                          {q.prompt}
+                          <Markdown source={q.prompt} inline />
                         </h3>
                       </div>
 
@@ -438,7 +437,10 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
                       <div>
                         <div className="space-y-2.5 border-t border-[var(--line)] px-4 pb-4 pt-3">
                           {q.codeSnippet ? (
-                            <pre className="code-cell overflow-x-auto rounded-2xl bg-[var(--ink)] p-3 text-xs leading-relaxed">
+                            <pre
+                              dir="ltr"
+                              className="code-cell overflow-x-auto rounded-2xl bg-[var(--ink)] p-3 text-xs leading-relaxed"
+                            >
                               <code>{q.codeSnippet}</code>
                             </pre>
                           ) : null}
@@ -485,7 +487,7 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
                                     </span>
                                     <div className="min-w-0 flex-1">
                                       <p className="text-sm font-medium leading-snug text-[var(--paper)]">
-                                        {opt}
+                                        <Markdown source={opt} inline />
                                       </p>
                                       {tags.length > 0 ? (
                                         <div className="mt-2 flex flex-wrap gap-1.5">

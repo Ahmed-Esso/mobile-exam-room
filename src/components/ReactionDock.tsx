@@ -7,6 +7,7 @@ import { emitLocalReaction } from './EmojiReactionOverlay';
 import { haptic } from './ui';
 
 const LABELS: Record<string, string> = {
+  '🐥': 'Chick',
   '😂': 'Laugh',
   '🔥': 'Fire',
   '👏': 'Clap',

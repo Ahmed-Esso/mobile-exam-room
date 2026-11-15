@@ -10,13 +10,13 @@ export async function POST(req: NextRequest) {
     const action = body.action || 'create';
     const memberId = String(body.memberId || `user-${Date.now()}`);
     const name = String(body.name || 'Player').trim();
-    const avatar = String(body.avatar || '🦊');
+    const avatar = String(body.avatar || '🐥');
 
     if (action === 'join') {
       const code = String(body.code || '').trim().toUpperCase();
-      if (!code) {
+      if (!code || code.length < 4) {
         return NextResponse.json(
-          { error: 'Room code is required to join.' },
+          { error: 'Please enter a valid 6-character room code.' },
           { status: 400 }
         );
       }
@@ -32,7 +32,6 @@ export async function POST(req: NextRequest) {
 
     const title = typeof body.title === 'string' ? body.title : undefined;
     const mode: GameMode = body.mode === 'race' ? 'race' : 'wait';
-    const withBots = body.withBots !== false;
 
     const room = createRoomInStore({
       memberId,
@@ -40,7 +39,6 @@ export async function POST(req: NextRequest) {
       avatar,
       title,
       mode,
-      withBots,
     });
 
     return NextResponse.json({ room });

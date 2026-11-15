@@ -1,14 +1,17 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, Bot, Dices, Loader2, LogIn, Plus, RotateCcw } from 'lucide-react';
+import { ArrowRight, Dices, Loader2, LogIn, Plus, RotateCcw, Users } from 'lucide-react';
 import { AVATAR_OPTIONS, type UseRoomReturn } from '@/types/exam';
-import { Avatar, Toggle, haptic } from './ui';
+import { Avatar, haptic } from './ui';
 import RoomLobby from './RoomLobby';
 
 const PROFILE_KEY = 'exam_room_profile_v1';
 
 const ANIMAL_NAMES: Record<string, string> = {
+  '🐥': 'Chick',
+  '🐣': 'Hatchling',
+  '🐤': 'Birdie',
   '🦊': 'Fox',
   '🐼': 'Panda',
   '🦁': 'Lion',
@@ -22,15 +25,12 @@ const ANIMAL_NAMES: Record<string, string> = {
   '🐝': 'Bee',
   '🐧': 'Pingu',
   '🦋': 'Flutter',
-  '🐬': 'Dolphin',
-  '🐺': 'Wolf',
-  '🐱': 'Cat',
 };
 const ADJECTIVES = ['Swift', 'Clever', 'Lucky', 'Bold', 'Sneaky', 'Sharp', 'Calm', 'Turbo', 'Witty', 'Brave'];
 
 function autoName(avatar: string) {
   const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  return `${adj} ${ANIMAL_NAMES[avatar] ?? 'Owl'}`;
+  return `${adj} ${ANIMAL_NAMES[avatar] ?? 'Chick'}`;
 }
 
 interface Profile {
@@ -80,12 +80,11 @@ function JoinScreen({
   inviteCode: string | null;
   rejoinCode: string | null;
 }) {
-  const [avatar, setAvatar] = useState<string>(AVATAR_OPTIONS[0]);
+  const [avatar, setAvatar] = useState<string>(AVATAR_OPTIONS[0]); // 🐥 by default
   const [name, setName] = useState('');
   const [custom, setCustom] = useState(false);
   const [tab, setTab] = useState<'create' | 'join'>(inviteCode ? 'join' : 'create');
   const [code, setCode] = useState(inviteCode ?? '');
-  const [withBots, setWithBots] = useState(true);
   const [avatarSpin, setAvatarSpin] = useState(0);
   const [codeFocused, setCodeFocused] = useState(false);
   const codeRef = useRef<HTMLInputElement>(null);
@@ -97,7 +96,7 @@ function JoinScreen({
       setName(p.name);
       setCustom(p.custom);
     } else {
-      const a = AVATAR_OPTIONS[Math.floor(Math.random() * AVATAR_OPTIONS.length)];
+      const a = AVATAR_OPTIONS[0]; // 🐥
       setAvatar(a);
       setName(autoName(a));
     }
@@ -129,7 +128,7 @@ function JoinScreen({
     haptic([10, 30, 10]);
     saveProfile({ name: finalName, avatar, custom });
     if (mode === 'create') {
-      await api.createRoom({ name: finalName, avatar, withBots });
+      await api.createRoom({ name: finalName, avatar });
     } else {
       await api.joinRoom({ code: overrideCode ?? code, name: finalName, avatar });
     }
@@ -168,7 +167,7 @@ function JoinScreen({
             )}
           </h1>
           <p className="mt-3 max-w-[32ch] text-[15px] leading-relaxed text-[var(--muted)]">
-            One code, everyone&apos;s phone. See who picked what, react in real time, and settle it on the podium.
+            One code, everyone&apos;s phone. Upload your Markdown, PDF, or exam screenshots and solve it live with friends.
           </p>
         </section>
 
@@ -276,12 +275,13 @@ function JoinScreen({
           {tab === 'create' ? (
             <div key="create" className="rise mt-4 space-y-3">
               <div className="flex items-center gap-3 rounded-2xl bg-[var(--surface)] px-4 py-3 shadow-[0_0_0_1px_var(--line)]">
-                <Bot size={20} className="shrink-0 text-[var(--peri)]" />
+                <Users size={20} className="shrink-0 text-[var(--peri)]" />
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-semibold">Bring practice bots</p>
-                  <p className="text-xs text-[var(--muted)]">Two bot friends answer and react, so you can try it solo.</p>
+                  <p className="text-sm font-semibold">Real-time room for you &amp; friends</p>
+                  <p className="text-xs text-[var(--muted)]">
+                    Share the 6-letter code or invite link, upload your questions, and start together.
+                  </p>
                 </div>
-                <Toggle checked={withBots} onChange={setWithBots} label="Bring practice bots" />
               </div>
               <button
                 type="button"
@@ -362,7 +362,7 @@ function JoinScreen({
         </section>
 
         <p className="mt-auto pt-8 text-center text-xs text-[var(--faint)]">
-          No accounts. Rooms clear themselves after 4 quiet hours.
+          No accounts. Rooms sync live across phones and clear after 4 quiet hours.
         </p>
       </div>
     </div>

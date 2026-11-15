@@ -21,6 +21,13 @@ export interface Question {
   timeLimitSeconds?: number;
 }
 
+export interface QuestionAttachment {
+  name: string;
+  mimeType: string;
+  base64Data: string;
+  sizeBytes?: number;
+}
+
 export interface MemberAnswer {
   questionIndex: number;
   optionIndex: number;
@@ -36,8 +43,6 @@ export interface Member {
   name: string;
   avatar: string;
   isHost: boolean;
-  isBot: boolean;
-  botPersonality?: 'genius' | 'speedster' | 'careful' | 'wildcard';
   score: number;
   streak: number;
   bestStreak: number;
@@ -55,7 +60,6 @@ export interface MemberAnswerTag {
   name: string;
   avatar: string;
   isMe: boolean;
-  isBot: boolean;
   optionIndex: number;
   isCorrect: boolean;
   timeMs: number;
@@ -83,7 +87,6 @@ export interface RoomSettingsUpdate {
   title?: string;
   mode?: GameMode;
   timePerQuestion?: number;
-  autoSimulateBots?: boolean;
 }
 
 export interface RoomState {
@@ -92,14 +95,29 @@ export interface RoomState {
   status: RoomStatus;
   mode: GameMode;
   timePerQuestion: number;
-  autoSimulateBots: boolean;
   hostId: string;
   currentQuestionIndex: number;
   questionStartedAt: number;
   /**
-   * In 'wait' mode: becomes true when all members have answered or host clicks Force Reveal.
-   * In 'race' mode: becomes true when all members have answered or host clicks Force Reveal
-   * (individual racers also see immediate feedback upon locking in their own answer).
+   * Monotonic session timestamp updated whenever startExam or resetRoom is triggered.
+   * Used by CRDT mergeRoomStates so old session answers don't carry into a new round.
+   */
+  examSessionId?: number;
+  /**
+   * Question index explicitly force-revealed by the host (-1 if none).
+   */
+  forceRevealedQuestionIndex?: number;
+  /**
+   * Timestamp when room.questions was last updated.
+   */
+  questionsUpdatedAt?: number;
+  /**
+   * IDs of members removed from the room so CRDT merges don't re-add them.
+   */
+  kickedMemberIds?: string[];
+  /**
+   * In 'wait' mode: becomes true ONLY when all members in the room have answered
+   * the current question or the host clicks Force Reveal.
    */
   isRevealed: boolean;
   questions: Question[];
@@ -165,7 +183,7 @@ export interface UseRoomReturn {
   /**
    * True when the current question's correct answer, explanation, and peer tags
    * should be shown to the local user:
-   * - In 'wait' mode: true only when room.isRevealed is true (all members answered or forced reveal)
+   * - In 'wait' mode: true ONLY when all members have answered or host forced reveal
    * - In 'race' mode: true as soon as the local member has answered OR room.isRevealed is true
    */
   isAnswerRevealedToMe: boolean;
@@ -179,7 +197,7 @@ export interface UseRoomReturn {
   answeredCount: number;
   /** Total number of members in the room */
   totalMembersCount: number;
-  /** Members who haveNOT answered the current question yet */
+  /** Members who have NOT answered the current question yet */
   waitingOnMembers: Member[];
   /**
    * Members who got the current question RIGHT while the local user got it WRONG.
@@ -202,7 +220,6 @@ export interface UseRoomReturn {
     avatar: string;
     title?: string;
     mode?: GameMode;
-    withBots?: boolean;
   }) => Promise<RoomState | null>;
   joinRoom: (params: {
     code: string;
@@ -217,6 +234,7 @@ export interface UseRoomReturn {
     title?: string;
     useGemini?: boolean;
     apiKey?: string;
+    attachments?: QuestionAttachment[];
   }) => Promise<ParseQuestionsResult | null>;
   startExam: (modeOverride?: GameMode) => Promise<void>;
   submitAnswer: (optionIndex: number) => Promise<void>;
@@ -225,11 +243,13 @@ export interface UseRoomReturn {
   resetRoom: (backToLobby?: boolean) => Promise<void>;
   sendReaction: (input: SendReactionInput | string) => Promise<void>;
   setStatusBadge: (badge: string | null) => Promise<void>;
-  addSimulatedMember: (personality?: Member['botPersonality']) => Promise<void>;
   removeMember: (memberId: string) => Promise<void>;
 }
 
 export const AVATAR_OPTIONS: string[] = [
+  '🐥',
+  '🐣',
+  '🐤',
   '🦊',
   '🐼',
   '🦁',
@@ -243,12 +263,10 @@ export const AVATAR_OPTIONS: string[] = [
   '🐝',
   '🐧',
   '🦋',
-  '🐬',
-  '🐺',
-  '🐱',
 ];
 
 export const ZOOM_REACTIONS: string[] = [
+  '🐥',
   '😂',
   '🔥',
   '👏',
@@ -262,6 +280,7 @@ export const ZOOM_REACTIONS: string[] = [
 
 export const STATUS_BADGES: { emoji: string; label: string }[] = [
   { emoji: '✋', label: 'Raise Hand' },
+  { emoji: '🐥', label: 'Chick Vibes' },
   { emoji: '🔥', label: 'On Fire' },
   { emoji: '🤔', label: 'Thinking Hard' },
   { emoji: '⚡', label: 'Speed Demon' },

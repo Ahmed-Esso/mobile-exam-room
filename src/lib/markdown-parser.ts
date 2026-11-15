@@ -1,14 +1,14 @@
 import { ParseQuestionsResult, Question } from '@/types/exam';
 
-export const MARKDOWN_FORMAT_GUIDE = `# Sample Exam Title
+export const MARKDOWN_FORMAT_GUIDE = `# Sample Format (Supports Markdown & LaTeX Math)
 
-### 1. What is the time complexity of looking up a key in a Hash Map (average case)?
-- A) O(n)
-- B) O(log n)
-- C) O(1)
-- D) O(n log n)
-**Answer:** C
-**Explanation:** Hash maps compute a hash index directly from the key, giving **O(1)** constant-time lookup on average (assuming minimal hash collisions).
+### 1. What is the kinetic energy of a particle with mass $m$ and velocity $v$?
+- A) $E_k = mv$
+- B) $E_k = \\frac{1}{2}mv^2$
+- C) $E_k = mc^2$
+- D) $E_k = mgh$
+**Answer:** B
+**Explanation:** Classical kinetic energy is given by $$E_k = \\frac{1}{2}mv^2$$ derived from integrating work $W = \\int F \\, dx = \\int m v \\, dv$.
 
 ---
 
@@ -17,17 +17,22 @@ export const MARKDOWN_FORMAT_GUIDE = `# Sample Exam Title
 - [ ] 403 Forbidden
 - [x] 429 Too Many Requests
 - [ ] 503 Service Unavailable
-> **Explanation:** HTTP **429 Too Many Requests** indicates the user has sent too many requests in a given amount of time ("rate limiting").`;
+> **Explanation:** HTTP **429 Too Many Requests** indicates the user has sent too many requests in a given time window.`;
+
+const ARABIC_LETTER_MAP: Record<string, number> = {
+  أ: 0,
+  ا: 0,
+  ب: 1,
+  ج: 2,
+  د: 3,
+  ه: 4,
+  هـ: 4,
+  و: 5,
+};
 
 /**
- * Deterministic, flexible Markdown Question Parser.
- * Supports:
- * - Question headers (`### 1. Question`, `## Q1:`, `1. Question`, or `---` dividers)
- * - Lettered options (`A) ...`, `A. ...`, `- A) ...`, `- **A.** ...`)
- * - Checkbox options (`- [x] ...`, `- [ ] ...`)
- * - Answer declarations (`**Answer:** B`, `Answer: C`, `Correct: A`, or inline `[x]` / `✓`)
- * - Explanation blocks (`**Explanation:** ...`, `> Explanation: ...`, `Why: ...`)
- * - Fenced code blocks (` ```ts ... ``` `)
+ * Deterministic, flexible Markdown Question Parser with full LaTeX ($...$, $$...$$, \(...\), \[...\])
+ * and bilingual (English + Arabic) support.
  */
 export function parseMarkdownQuestions(markdown: string): ParseQuestionsResult {
   const warnings: string[] = [];
@@ -37,7 +42,6 @@ export function parseMarkdownQuestions(markdown: string): ParseQuestionsResult {
     return { questions: [], source: 'markdown', warnings: ['Empty markdown input.'] };
   }
 
-  // Split into raw candidate question blocks
   const blocks = splitIntoQuestionBlocks(normalized);
   const questions: Question[] = [];
 
@@ -50,7 +54,7 @@ export function parseMarkdownQuestions(markdown: string): ParseQuestionsResult {
 
   if (questions.length === 0) {
     warnings.push(
-      'Could not detect structured questions with options. Make sure each question has at least 2 options (e.g., A), B), C), D) or - [ ] / - [x]).'
+      'Could not detect structured questions with options. Make sure each question has at least 2 options (e.g., A), B), C), D) or - [ ] / - [x]), or enable Gemini AI Smart Parse.'
     );
   }
 
@@ -62,7 +66,6 @@ export function parseMarkdownQuestions(markdown: string): ParseQuestionsResult {
 }
 
 function splitIntoQuestionBlocks(markdown: string): string[] {
-  // Remove top-level single H1 document title if followed by content
   const lines = markdown.split('\n');
   const cleanedLines: string[] = [];
   let inCodeFence = false;
@@ -80,27 +83,30 @@ function splitIntoQuestionBlocks(markdown: string): string[] {
 
   const body = cleanedLines.join('\n').trim();
 
-  // First try splitting by horizontal rules `---` outside code blocks
-  const hrBlocks = splitByOutsideCode(body, /^---+$/m);
+  const hrBlocks = splitByOutsideCodeAndMath(body, /^---+$/m);
   if (hrBlocks.length > 1) {
-    // Further split any hrBlock that contains multiple headers
     return hrBlocks.flatMap((b) => splitByQuestionHeaders(b));
   }
 
   return splitByQuestionHeaders(body);
 }
 
-function splitByOutsideCode(text: string, delimiterRegex: RegExp): string[] {
+function splitByOutsideCodeAndMath(text: string, delimiterRegex: RegExp): string[] {
   const lines = text.split('\n');
   const chunks: string[] = [];
   let current: string[] = [];
   let inCode = false;
+  let inMathBlock = false;
 
   for (const line of lines) {
-    if (line.trim().startsWith('```')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('```')) {
       inCode = !inCode;
     }
-    if (!inCode && delimiterRegex.test(line.trim())) {
+    if (!inCode && trimmed.startsWith('$$') && (trimmed === '$$' || !trimmed.slice(2).includes('$$'))) {
+      inMathBlock = !inMathBlock;
+    }
+    if (!inCode && !inMathBlock && delimiterRegex.test(trimmed)) {
       if (current.join('\n').trim()) {
         chunks.push(current.join('\n').trim());
       }
@@ -122,7 +128,7 @@ function splitByQuestionHeaders(text: string): string[] {
   let inCode = false;
 
   const headerPattern =
-    /^(?:#{2,4}\s*(?:Q(?:uestion)?\s*\d*[:.)]?\s*|\d+[:.)]\s*)?|(?:Q(?:uestion)?\s*\d+[:.)]\s*)|\*\*(?:Q(?:uestion)?\s*\d+|\d+)[.:)]\*\*|\d+[.)]\s+(?=[A-ZWhat|Which|How|Why|When|Where|Who|In|If|Given|Consider|Select]))/i;
+    /^(?:#{2,4}\s*(?:Q(?:uestion)?\s*\d*[:.)]?\s*|س(?:ؤال)?\s*\d*[:.)]?\s*|\d+[:.)]\s*)?|(?:Q(?:uestion)?\s*\d+[:.)]\s*)|(?:س(?:ؤال)?\s*\d+[:.)]\s*)|\*\*(?:Q(?:uestion)?\s*\d+|س(?:ؤال)?\s*\d+|\d+)[.:)]\*\*|\d+[.)]\s+\S+)/i;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -130,12 +136,11 @@ function splitByQuestionHeaders(text: string): string[] {
       inCode = !inCode;
     }
 
-    // Do not split on numbered options like `1) foo` if not preceded by blank line or if current has no options yet
     const isHeader =
       !inCode &&
       headerPattern.test(trimmed) &&
       !/^[-*]\s/.test(trimmed) &&
-      !/^[A-Da-d][.)]\s/.test(trimmed);
+      !/^[A-Fa-fأابجده][.)]\s/.test(trimmed);
 
     if (isHeader && current.length > 0 && hasOptionLikeLines(current.join('\n'))) {
       blocks.push(current.join('\n').trim());
@@ -166,8 +171,8 @@ function hasOptionLikeLines(block: string): boolean {
 function isOptionLine(trimmed: string): boolean {
   return (
     /^[-*+]\s*\[[ xX✓✔]\]\s+/.test(trimmed) ||
-    /^(?:[-*+]\s*)?(?:\*\*)?[A-Fa-f][.)](?:\*\*)?\s+/.test(trimmed) ||
-    /^(?:[-*+]\s*)?\([A-Fa-f]\)\s+/.test(trimmed)
+    /^(?:[-*+]\s*)?(?:\*\*)?(?:[A-Fa-f]|[أابجده])[\.\)\-](?:\*\*)?\s+/.test(trimmed) ||
+    /^(?:[-*+]\s*)?\((?:[A-Fa-f]|[أابجده])\)\s+/.test(trimmed)
   );
 }
 
@@ -210,11 +215,12 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
     if (!trimmed) {
       if (inExplanation && explanationLines.length > 0) {
         explanationLines.push('');
+      } else if (!seenFirstOption && promptLines.length > 0) {
+        promptLines.push('');
       }
       continue;
     }
 
-    // Check metadata tags e.g. [Category: Cardiology] [Difficulty: Hard]
     const catMatch = trimmed.match(/^\[Category:\s*([^\]]+)\]/i);
     if (catMatch) {
       category = catMatch[1].trim();
@@ -226,9 +232,9 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       continue;
     }
 
-    // Check explicit Answer line
+    // Check explicit Answer line (English + Arabic labels, preserving LaTeX underscores/backslashes)
     const answerMatch = trimmed.match(
-      /^(?:>\s*)?(?:\*\*|__)?(?:Correct\s+Answer|Answer|Correct|Ans)(?:\*\*|__)?\s*[:\-](?:\*\*|__)?\s*(?:\*\*|__)?(.+?)(?:\*\*|__)?$/i
+      /^(?:>\s*)?(?:\*\*)?(?:Correct\s+Answer|Answer|Correct|Ans|الإجابة\s+الصحيحة|الاجابة\s+الصحيحة|الإجابة|الاجابة|الجواب)(?:\*\*)?\s*[:\-](?:\*\*)?\s*(?:\*\*)?(.+?)(?:\*\*)?$/i
     );
     if (answerMatch) {
       explicitAnswerRaw = answerMatch[1].trim();
@@ -236,9 +242,9 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       continue;
     }
 
-    // Check Explanation start line
+    // Check Explanation start line (English + Arabic labels)
     const explanationMatch = trimmed.match(
-      /^(?:>\s*)?(?:💡\s*)?(?:\*\*|__)?(?:Explanation|Why|Rationale|Note)(?:\*\*|__)?\s*[:\-](?:\*\*|__)?\s*(.*)$/i
+      /^(?:>\s*)?(?:💡\s*)?(?:\*\*)?(?:Explanation|Why|Rationale|Note|التفسير|الشرح|التوضيح|السبب)(?:\*\*)?\s*[:\-](?:\*\*)?\s*(.*)$/i
     );
     if (explanationMatch) {
       inExplanation = true;
@@ -249,7 +255,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
     }
 
     if (inExplanation) {
-      explanationLines.push(trimmed.replace(/^>\s*/, ''));
+      explanationLines.push(rawLine.replace(/^\s*>\s?/, ''));
       continue;
     }
 
@@ -259,8 +265,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       seenFirstOption = true;
       const isChecked = /[xX✓✔]/.test(checkboxMatch[1]);
       let optText = checkboxMatch[2].trim();
-      // Strip leading A) or B. inside checkbox if present
-      optText = optText.replace(/^(?:\*\*)?[A-Fa-f][.)](?:\*\*)?\s+/, '');
+      optText = optText.replace(/^(?:\*\*)?(?:[A-Fa-f]|[أابجده])[.)](?:\*\*)?\s+/, '');
       if (isChecked) {
         detectedCorrectIndex = options.length;
       }
@@ -268,18 +273,17 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       continue;
     }
 
-    // Check Lettered Option: `A) text`, `- A) text`, `**A.** text`, `(A) text`
+    // Check Lettered Option: `A) text`, `- A) text`, `**A.** text`, `(A) text`, `أ) text`
     const letterMatch = trimmed.match(
-      /^(?:[-*+]\s*)?(?:\*\*|__)?(?:\(([A-Fa-f])\)|([A-Fa-f])[.)])(?:\*\*|__)?\s+(.+)$/
+      /^(?:[-*+]\s*)?(?:\*\*)?(?:\(([A-Fa-fأابجده])\)|([A-Fa-fأابجده])[.)\-])(?:\*\*)?\s+(.+)$/
     );
     if (letterMatch) {
       seenFirstOption = true;
       let optText = letterMatch[3].trim();
-      // Check if option ends with `(correct)` or `✓` or `[x]`
-      if (/(?:\(correct\)|\[correct\]|\[x\]|✅|✓|✔)\s*$/i.test(optText)) {
+      if (/(?:\(correct\)|\[correct\]|\[x\]|\(صحيح\)|✅|✓|✔)\s*$/i.test(optText)) {
         detectedCorrectIndex = options.length;
         optText = optText
-          .replace(/(?:\(correct\)|\[correct\]|\[x\]|✅|✓|✔)\s*$/i, '')
+          .replace(/(?:\(correct\)|\[correct\]|\[x\]|\(صحيح\)|✅|✓|✔)\s*$/i, '')
           .trim();
       }
       options.push(optText);
@@ -294,17 +298,16 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
     }
 
     if (!seenFirstOption) {
-      // Clean question header prefix on first prompt line
       if (promptLines.length === 0) {
         const cleanedHeader = trimmed
           .replace(/^#{1,6}\s*/, '')
-          .replace(/^(?:\*\*)?(?:Q(?:uestion)?\s*\d+|\d+)[.:)](?:\*\*)?\s*/i, '')
+          .replace(/^(?:\*\*)?(?:Q(?:uestion)?\s*\d+|س(?:ؤال)?\s*\d+|\d+)[.:)](?:\*\*)?\s*/i, '')
           .trim();
         if (cleanedHeader) {
           promptLines.push(cleanedHeader);
         }
       } else {
-        promptLines.push(trimmed);
+        promptLines.push(rawLine.trim());
       }
     }
   }
@@ -313,18 +316,21 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
     return null;
   }
 
-  // Resolve explicitAnswerRaw if present
   if (explicitAnswerRaw) {
     const cleanAns = explicitAnswerRaw.replace(/^[\[(]|[\])]$/g, '').trim();
-    // Single letter A-F or letter followed by ) or .
     const letterAnsMatch = cleanAns.match(/^([A-Fa-f])(?:[.)\s]|$)/);
+    const arabicAnsMatch = cleanAns.match(/^([أابجده])(?:[.)\s]|$)/);
     if (letterAnsMatch) {
       const idx = letterAnsMatch[1].toUpperCase().charCodeAt(0) - 65;
       if (idx >= 0 && idx < options.length) {
         detectedCorrectIndex = idx;
       }
+    } else if (arabicAnsMatch && ARABIC_LETTER_MAP[arabicAnsMatch[1]] !== undefined) {
+      const idx = ARABIC_LETTER_MAP[arabicAnsMatch[1]];
+      if (idx >= 0 && idx < options.length) {
+        detectedCorrectIndex = idx;
+      }
     } else {
-      // Try matching by option text
       const matchedIdx = options.findIndex(
         (opt) =>
           opt.toLowerCase() === cleanAns.toLowerCase() ||
@@ -341,9 +347,16 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
     detectedCorrectIndex = 0;
   }
 
-  const prompt = promptLines.join(' ').trim() || `Question ${index + 1}`;
+  const prompt =
+    promptLines
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim() || `Question ${index + 1}`;
   const explanation =
-    explanationLines.join('\n').trim() ||
+    explanationLines
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim() ||
     `The correct answer is **${String.fromCharCode(65 + detectedCorrectIndex)}) ${options[detectedCorrectIndex]}**.`;
 
   return {

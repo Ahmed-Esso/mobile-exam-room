@@ -73,7 +73,7 @@ export default function HomePage() {
               reactions={api.activeReactions}
               meId={me?.id ?? null}
               meName={me?.name ?? 'You'}
-              meAvatar={me?.avatar ?? '🦊'}
+              meAvatar={me?.avatar ?? '🐥'}
             />
           ) : null}
         </div>

@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import mqtt, { MqttClient } from 'mqtt';
 import {
   EmojiReaction,
   GameMode,
@@ -9,17 +10,24 @@ import {
   MemberAnswerTag,
   ParseQuestionsResult,
   Question,
+  QuestionAttachment,
   RoomSettingsUpdate,
   RoomState,
   SendReactionInput,
   UseRoomReturn,
 } from '@/types/exam';
 import { parseMarkdownQuestions } from '@/lib/markdown-parser';
+import { mergeRoomStates } from '@/lib/room-store';
 
-const STORAGE_MEMBER_ID_KEY = 'exam_room_member_id_v1';
-const STORAGE_ACTIVE_ROOM_KEY = 'exam_room_active_code_v1';
-const BROADCAST_CHANNEL_NAME = 'exam_room_live_channel_v1';
+const STORAGE_MEMBER_ID_KEY = 'exam_room_member_id_v2';
+const STORAGE_ACTIVE_ROOM_KEY = 'exam_room_active_code_v2';
+const BROADCAST_CHANNEL_NAME = 'exam_room_live_channel_v2';
 const REACTION_TTL_MS = 6500;
+
+const MQTT_BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://test.mosquitto.org:8081/mqtt',
+];
 
 function getOrCreateLocalMemberId(): string {
   if (typeof window === 'undefined') return 'ssr-member';
@@ -43,7 +51,8 @@ export function useRoom(): UseRoomReturn {
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
 
   const channelRef = useRef<BroadcastChannel | null>(null);
-  const roomCodeRef = useRef<string | null>(null);
+  const mqttClientRef = useRef<MqttClient | null>(null);
+  const roomRef = useRef<RoomState | null>(null);
 
   useEffect(() => {
     const id = getOrCreateLocalMemberId();
@@ -51,8 +60,8 @@ export function useRoom(): UseRoomReturn {
   }, []);
 
   useEffect(() => {
-    roomCodeRef.current = room?.code || null;
-  }, [room?.code]);
+    roomRef.current = room;
+  }, [room]);
 
   // Periodic tick to expire old floating reactions smoothly
   useEffect(() => {
@@ -62,7 +71,60 @@ export function useRoom(): UseRoomReturn {
     return () => clearInterval(timer);
   }, []);
 
-  // Setup BroadcastChannel for instant zero-latency cross-tab sync on the same device
+  const publishMqttState = useCallback((stateToPublish: RoomState) => {
+    const client = mqttClientRef.current;
+    if (!client || !client.connected || !stateToPublish?.code) return;
+    try {
+      const stateTopic = `examroom/v2/${stateToPublish.code}/state`;
+      client.publish(stateTopic, JSON.stringify(stateToPublish), {
+        qos: 1,
+        retain: true,
+      });
+    } catch {
+      // Ignore MQTT publish errors
+    }
+  }, []);
+
+  const applyAndBroadcastRoom = useCallback(
+    (nextRoom: RoomState | null, shouldPublishMqtt = true) => {
+      if (!nextRoom) {
+        roomRef.current = null;
+        setRoom(null);
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.removeItem(STORAGE_ACTIVE_ROOM_KEY);
+          } catch {
+            // Ignore
+          }
+        }
+        return;
+      }
+
+      setRoom((prev) => {
+        const merged =
+          prev && prev.code === nextRoom.code
+            ? mergeRoomStates(prev, nextRoom)
+            : nextRoom;
+        roomRef.current = merged;
+
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.setItem(STORAGE_ACTIVE_ROOM_KEY, merged.code);
+            channelRef.current?.postMessage(merged);
+          } catch {
+            // Ignore
+          }
+        }
+        if (shouldPublishMqtt) {
+          publishMqttState(merged);
+        }
+        return merged;
+      });
+    },
+    [publishMqttState]
+  );
+
+  // Setup BroadcastChannel for instant same-browser tab sync
   useEffect(() => {
     if (typeof window === 'undefined' || !('BroadcastChannel' in window)) {
       return;
@@ -75,13 +137,13 @@ export function useRoom(): UseRoomReturn {
       if (
         incoming &&
         incoming.code &&
-        incoming.code === roomCodeRef.current
+        incoming.code === roomRef.current?.code
       ) {
         setRoom((prev) => {
-          if (!prev || incoming.version >= prev.version) {
-            return incoming;
-          }
-          return prev;
+          if (!prev) return incoming;
+          const merged = mergeRoomStates(prev, incoming);
+          roomRef.current = merged;
+          return merged;
         });
       }
     };
@@ -92,55 +154,170 @@ export function useRoom(): UseRoomReturn {
     };
   }, []);
 
-  const applyAndBroadcastRoom = useCallback((nextRoom: RoomState | null) => {
-    setRoom(nextRoom);
-    if (typeof window !== 'undefined') {
-      try {
-        if (nextRoom) {
-          window.localStorage.setItem(STORAGE_ACTIVE_ROOM_KEY, nextRoom.code);
-          channelRef.current?.postMessage(nextRoom);
-        } else {
-          window.localStorage.removeItem(STORAGE_ACTIVE_ROOM_KEY);
-        }
-      } catch {
-        // Ignore storage errors
-      }
-    }
-  }, []);
+  // Setup real-time MQTT over WebSockets for instant multi-phone sync across Vercel instances
+  useEffect(() => {
+    const code = room?.code;
+    if (!code || typeof window === 'undefined') return;
 
-  // Poll `/api/rooms/[code]` every 600ms while inside a room
+    let brokerIdx = 0;
+    let isCancelled = false;
+    const stateTopic = `examroom/v2/${code}/state`;
+    const pingTopic = `examroom/v2/${code}/ping`;
+
+    const connectBroker = (url: string) => {
+      const client = mqtt.connect(url, {
+        clientId: `exam-${code}-${Math.random().toString(36).slice(2, 9)}`,
+        clean: true,
+        connectTimeout: 5000,
+        reconnectPeriod: 2000,
+      });
+
+      mqttClientRef.current = client;
+
+      client.on('connect', () => {
+        if (isCancelled) return;
+        client.subscribe([stateTopic, pingTopic], { qos: 1 }, () => {
+          // Immediately broadcast our current state and send a ping so all connected phones exchange & merge states
+          if (roomRef.current && roomRef.current.code === code) {
+            client.publish(stateTopic, JSON.stringify(roomRef.current), {
+              qos: 1,
+              retain: true,
+            });
+            client.publish(
+              pingTopic,
+              JSON.stringify({
+                sender: getOrCreateLocalMemberId(),
+                ts: Date.now(),
+              }),
+              { qos: 0, retain: false }
+            );
+          }
+        });
+      });
+
+      client.on('message', (topic, payload) => {
+        if (isCancelled) return;
+        try {
+          if (topic === pingTopic) {
+            const pingData = JSON.parse(payload.toString());
+            if (
+              pingData?.sender !== getOrCreateLocalMemberId() &&
+              roomRef.current &&
+              roomRef.current.code === code
+            ) {
+              client.publish(stateTopic, JSON.stringify(roomRef.current), {
+                qos: 1,
+                retain: true,
+              });
+            }
+            return;
+          }
+
+          if (topic === stateTopic) {
+            const incoming = JSON.parse(payload.toString()) as RoomState;
+            if (!incoming || incoming.code !== code) return;
+
+            setRoom((prev) => {
+              if (!prev || prev.code !== code) {
+                roomRef.current = incoming;
+                return incoming;
+              }
+              const prevMemberCount = prev.members.length;
+              const merged = mergeRoomStates(prev, incoming);
+              roomRef.current = merged;
+
+              // If merging discovered new members that the incoming payload didn't have, re-broadcast merged union
+              if (
+                merged.members.length > incoming.members.length ||
+                merged.members.length > prevMemberCount
+              ) {
+                try {
+                  client.publish(stateTopic, JSON.stringify(merged), {
+                    qos: 1,
+                    retain: true,
+                  });
+                } catch {
+                  // Ignore
+                }
+              }
+              return merged;
+            });
+          }
+        } catch {
+          // Ignore malformed MQTT messages
+        }
+      });
+
+      client.on('error', () => {
+        if (isCancelled) return;
+        if (brokerIdx === 0 && MQTT_BROKERS.length > 1) {
+          brokerIdx = 1;
+          try {
+            client.end(true);
+          } catch {
+            // Ignore
+          }
+          connectBroker(MQTT_BROKERS[1]);
+        }
+      });
+    };
+
+    connectBroker(MQTT_BROKERS[0]);
+
+    return () => {
+      isCancelled = true;
+      if (mqttClientRef.current) {
+        try {
+          mqttClientRef.current.end(true);
+        } catch {
+          // Ignore
+        }
+        mqttClientRef.current = null;
+      }
+    };
+  }, [room?.code]);
+
+  // Bi-directional HTTP sync every 800ms with fallbackRoom CRDT merge
   useEffect(() => {
     if (!room?.code) return;
     let cancelled = false;
     const code = room.code;
 
-    const poll = async () => {
+    const syncWithServer = async () => {
       try {
+        const currentRoom = roomRef.current;
+        const activeMemberId = memberId || getOrCreateLocalMemberId();
         const res = await fetch(`/api/rooms/${encodeURIComponent(code)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           cache: 'no-store',
+          body: JSON.stringify({
+            action: 'sync',
+            memberId: activeMemberId,
+            fallbackRoom: currentRoom,
+          }),
         });
         if (!res.ok) return;
         const data = await res.json();
         if (!cancelled && data?.room) {
           setRoom((prev) => {
             if (!prev) return data.room;
-            if (data.room.version >= prev.version) {
-              return data.room;
-            }
-            return prev;
+            const merged = mergeRoomStates(prev, data.room);
+            roomRef.current = merged;
+            return merged;
           });
         }
       } catch {
-        // Ignore transient network poll errors
+        // Ignore transient network errors
       }
     };
 
-    const interval = setInterval(poll, 600);
+    const interval = setInterval(syncWithServer, 800);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [room?.code]);
+  }, [room?.code, memberId]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -150,7 +327,6 @@ export function useRoom(): UseRoomReturn {
       avatar: string;
       title?: string;
       mode?: GameMode;
-      withBots?: boolean;
     }): Promise<RoomState | null> => {
       setIsLoading(true);
       setError(null);
@@ -168,14 +344,21 @@ export function useRoom(): UseRoomReturn {
             avatar: params.avatar,
             title: params.title,
             mode: params.mode || 'wait',
-            withBots: params.withBots !== false,
           }),
         });
         const data = await res.json();
         if (!res.ok || !data.room) {
           throw new Error(data.error || 'Could not create room.');
         }
-        applyAndBroadcastRoom(data.room);
+        roomRef.current = data.room;
+        setRoom(data.room);
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.setItem(STORAGE_ACTIVE_ROOM_KEY, data.room.code);
+          } catch {
+            // Ignore
+          }
+        }
         return data.room as RoomState;
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Failed to create room';
@@ -185,7 +368,7 @@ export function useRoom(): UseRoomReturn {
         setIsLoading(false);
       }
     },
-    [memberId, applyAndBroadcastRoom]
+    [memberId]
   );
 
   const joinRoom = useCallback(
@@ -216,7 +399,15 @@ export function useRoom(): UseRoomReturn {
         if (!res.ok || !data.room) {
           throw new Error(data.error || `Room "${cleanCode}" not found.`);
         }
-        applyAndBroadcastRoom(data.room);
+        roomRef.current = data.room;
+        setRoom(data.room);
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.setItem(STORAGE_ACTIVE_ROOM_KEY, data.room.code);
+          } catch {
+            // Ignore
+          }
+        }
         return data.room as RoomState;
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Failed to join room';
@@ -226,35 +417,44 @@ export function useRoom(): UseRoomReturn {
         setIsLoading(false);
       }
     },
-    [memberId, applyAndBroadcastRoom]
+    [memberId]
   );
 
   const leaveRoom = useCallback(() => {
-    applyAndBroadcastRoom(null);
+    if (mqttClientRef.current) {
+      try {
+        mqttClientRef.current.end(true);
+      } catch {
+        // Ignore
+      }
+      mqttClientRef.current = null;
+    }
+    applyAndBroadcastRoom(null, false);
     setError(null);
   }, [applyAndBroadcastRoom]);
 
   const postRoomAction = useCallback(
     async (action: string, payload: Record<string, unknown> = {}) => {
-      if (!room?.code) return;
+      const currentRoom = roomRef.current;
+      if (!currentRoom?.code) return;
       try {
         const activeMemberId = memberId || getOrCreateLocalMemberId();
         const res = await fetch(
-          `/api/rooms/${encodeURIComponent(room.code)}`,
+          `/api/rooms/${encodeURIComponent(currentRoom.code)}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               action,
               memberId: activeMemberId,
-              fallbackRoom: room,
+              fallbackRoom: currentRoom,
               ...payload,
             }),
           }
         );
         const data = await res.json();
         if (res.ok && data?.room) {
-          applyAndBroadcastRoom(data.room);
+          applyAndBroadcastRoom(data.room, true);
         } else if (data?.error) {
           setError(data.error);
         }
@@ -262,7 +462,7 @@ export function useRoom(): UseRoomReturn {
         setError(err instanceof Error ? err.message : 'Action failed');
       }
     },
-    [room?.code, memberId, applyAndBroadcastRoom]
+    [memberId, applyAndBroadcastRoom]
   );
 
   const updateSettings = useCallback(
@@ -285,6 +485,7 @@ export function useRoom(): UseRoomReturn {
       title?: string;
       useGemini?: boolean;
       apiKey?: string;
+      attachments?: QuestionAttachment[];
     }): Promise<ParseQuestionsResult | null> => {
       setIsLoading(true);
       setError(null);
@@ -296,41 +497,43 @@ export function useRoom(): UseRoomReturn {
             markdown: params.markdown,
             useGemini: params.useGemini,
             apiKey: params.apiKey,
+            attachments: params.attachments,
           }),
         });
         const data = (await res.json()) as ParseQuestionsResult & {
           error?: string;
         };
         if (!res.ok || !data.questions || data.questions.length === 0) {
-          // Try client-side deterministic fallback just in case
-          const fallback = parseMarkdownQuestions(params.markdown);
-          if (fallback.questions.length === 0) {
-            throw new Error(
-              data.error ||
-                fallback.warnings?.[0] ||
-                'Could not parse any questions from the provided Markdown.'
-            );
+          if (params.markdown && (!params.attachments || params.attachments.length === 0)) {
+            const fallback = parseMarkdownQuestions(params.markdown);
+            if (fallback.questions.length > 0) {
+              if (roomRef.current?.code) {
+                await setQuestions(fallback.questions, params.title);
+              }
+              return fallback;
+            }
           }
-          if (room?.code) {
-            await setQuestions(fallback.questions, params.title);
-          }
-          return fallback;
+          throw new Error(
+            data.error ||
+              data.warnings?.[0] ||
+              'Could not parse any questions from the provided input.'
+          );
         }
 
-        if (room?.code) {
+        if (roomRef.current?.code) {
           await setQuestions(data.questions, params.title);
         }
         return data;
       } catch (err) {
         const msg =
-          err instanceof Error ? err.message : 'Failed to parse Markdown';
+          err instanceof Error ? err.message : 'Failed to parse questions';
         setError(msg);
         return null;
       } finally {
         setIsLoading(false);
       }
     },
-    [room?.code, setQuestions]
+    [setQuestions]
   );
 
   const startExam = useCallback(
@@ -380,13 +583,6 @@ export function useRoom(): UseRoomReturn {
     [postRoomAction]
   );
 
-  const addSimulatedMember = useCallback(
-    async (personality?: Member['botPersonality']) => {
-      await postRoomAction('addSimulatedMember', { personality });
-    },
-    [postRoomAction]
-  );
-
   const removeMember = useCallback(
     async (targetMemberId: string) => {
       await postRoomAction('removeMember', { targetMemberId });
@@ -417,11 +613,28 @@ export function useRoom(): UseRoomReturn {
     return me.answers[room.currentQuestionIndex] || null;
   }, [room, me]);
 
+  /**
+   * Strict Wait-Mode vs Race-Mode reveal check:
+   * In 'wait' mode, NEVER reveal the answer until either:
+   * - room.status === 'finished'
+   * - room.forceRevealedQuestionIndex === room.currentQuestionIndex (Host clicked Force Reveal)
+   * - Every member currently in room.members has locked in an answer for room.currentQuestionIndex
+   */
   const isAnswerRevealedToMe = useMemo<boolean>(() => {
     if (!room) return false;
-    if (room.isRevealed || room.status === 'finished') return true;
-    if (room.mode === 'race' && myCurrentAnswer !== null) return true;
-    return false;
+    if (room.status === 'finished') return true;
+    const qIdx = room.currentQuestionIndex;
+    const isForceRevealed = room.forceRevealedQuestionIndex === qIdx;
+    const allMembersAnswered =
+      room.members.length > 0 &&
+      room.members.every((m) => m.answers[qIdx] !== undefined);
+
+    if (room.mode === 'wait') {
+      return isForceRevealed || (room.isRevealed && allMembersAnswered);
+    }
+
+    // In 'race' mode, reveal as soon as the local player answers OR when everyone has answered / forced reveal
+    return myCurrentAnswer !== null || isForceRevealed || allMembersAnswered;
   }, [room, myCurrentAnswer]);
 
   const optionTags = useMemo<Record<number, MemberAnswerTag[]>>(() => {
@@ -434,7 +647,6 @@ export function useRoom(): UseRoomReturn {
 
     const qIdx = room.currentQuestionIndex;
 
-    // Collect all members who answered this question, sorted by answeredAt asc
     const answeredMembers = room.members
       .filter((m) => m.answers[qIdx] !== undefined)
       .sort(
@@ -448,10 +660,9 @@ export function useRoom(): UseRoomReturn {
       if (!ans) return;
       const isMe = me ? m.id === me.id : false;
 
-      // In 'wait' mode, before room.isRevealed is true, only show the local user's own tag on their selected option
-      // Once room.isRevealed is true (or in 'race' mode), show everyone's member tags on the options!
+      // In 'wait' mode before isAnswerRevealedToMe is true, only show the local user's own tag on their chosen option
       const canSeeTag =
-        room.mode === 'race' || room.isRevealed || isMe;
+        room.mode === 'race' || isAnswerRevealedToMe || isMe;
 
       if (!canSeeTag) return;
 
@@ -463,7 +674,6 @@ export function useRoom(): UseRoomReturn {
         name: m.name,
         avatar: m.avatar,
         isMe,
-        isBot: m.isBot,
         optionIndex: ans.optionIndex,
         isCorrect: ans.isCorrect,
         timeMs: ans.timeMs,
@@ -473,7 +683,7 @@ export function useRoom(): UseRoomReturn {
     });
 
     return map;
-  }, [room, currentQuestion, me]);
+  }, [room, currentQuestion, me, isAnswerRevealedToMe]);
 
   const answeredCount = useMemo<number>(() => {
     if (!room) return 0;
@@ -555,7 +765,6 @@ export function useRoom(): UseRoomReturn {
     resetRoom,
     sendReaction,
     setStatusBadge,
-    addSimulatedMember,
     removeMember,
   };
 }

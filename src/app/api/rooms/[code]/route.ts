@@ -26,14 +26,14 @@ export async function POST(
   try {
     const { code } = await params;
     const body = await req.json();
-    const action = String(body.action || '');
+    const action = String(body.action || 'sync');
 
     if (action === 'join') {
       const room = joinRoomInStore({
         code,
         memberId: String(body.memberId || `user-${Date.now()}`),
         name: String(body.name || 'Player'),
-        avatar: String(body.avatar || '🐼'),
+        avatar: String(body.avatar || '🐥'),
       });
       if (!room) {
         return NextResponse.json({ error: 'Room not found' }, { status: 404 });

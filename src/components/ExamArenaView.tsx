@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
-  Bot,
   Check,
   Clock,
   Eye,
@@ -103,7 +102,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
   const timerLow = !isAnswerRevealedToMe && remainingSec <= 7;
 
   const handleSelectOption = async (idx: number) => {
-    if (hasLockedIn || room.isRevealed) return;
+    if (hasLockedIn || isAnswerRevealedToMe) return;
     setOptimisticOption(idx);
     haptic(12);
     await api.submitAnswer(idx);
@@ -144,27 +143,12 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
               {room.mode === 'race' ? 'RACE MODE' : 'WAIT FOR ALL'}
             </span>
 
-            <span className="code-cell hidden rounded-full bg-[var(--surface-2)] px-2 py-0.5 text-[11px] font-semibold text-[var(--muted)] xs:inline-block">
+            <span className="code-cell rounded-full bg-[var(--surface-2)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--muted)]">
               {room.code}
             </span>
           </div>
 
           <div className="flex items-center gap-2">
-            {isHost ? (
-              <button
-                type="button"
-                onClick={() => {
-                  haptic(6);
-                  void api.addSimulatedMember();
-                }}
-                className="press flex h-8 items-center gap-1 rounded-full bg-[var(--surface-2)] px-2.5 text-[11px] font-semibold text-[var(--muted)] shadow-[0_0_0_1px_var(--line)] hover:text-[var(--paper)]"
-                title="Add practice bot friend"
-              >
-                <Bot size={13} className="text-[var(--peri)]" />
-                +Bot
-              </button>
-            ) : null}
-
             {/* Timer Pill */}
             <div
               className="code-cell flex h-8 items-center gap-1.5 rounded-full px-2.5 text-xs font-bold tabular"
@@ -256,18 +240,21 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
               ) : null}
             </div>
 
-            <h1 className="mt-2.5 font-display text-[21px] font-bold leading-[1.28] text-[var(--paper)] [text-wrap:balance]">
-              {currentQuestion.prompt}
-            </h1>
+            <div className="mt-2.5 font-display text-[20px] font-bold leading-[1.34] text-[var(--paper)]">
+              <Markdown source={currentQuestion.prompt} />
+            </div>
 
             {currentQuestion.codeSnippet ? (
-              <pre className="code-cell mt-3 overflow-x-auto rounded-2xl bg-[var(--ink)] p-3.5 text-[12.5px] leading-relaxed text-[var(--paper)] shadow-[inset_0_2px_4px_rgba(0,0,0,0.45),0_0_0_1px_var(--line)]">
+              <pre
+                dir="ltr"
+                className="code-cell mt-3 overflow-x-auto rounded-2xl bg-[var(--ink)] p-3.5 text-[12.5px] leading-relaxed text-[var(--paper)] shadow-[inset_0_2px_4px_rgba(0,0,0,0.45),0_0_0_1px_var(--line)]"
+              >
                 <code>{currentQuestion.codeSnippet}</code>
               </pre>
             ) : null}
           </article>
 
-          {/* Answer Options with Member Answer Tags */}
+          {/* Answer Options with Member Answer Tags & LaTeX Rendering */}
           <section
             aria-label="Answer options"
             className={`space-y-2.5 ${justBurst ? 'burst' : ''}`}
@@ -290,7 +277,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                 <button
                   key={idx}
                   type="button"
-                  disabled={hasLockedIn || room.isRevealed}
+                  disabled={hasLockedIn || isAnswerRevealedToMe}
                   onClick={() => void handleSelectOption(idx)}
                   data-state={state}
                   className="option p-3.5"
@@ -302,7 +289,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                       <div className="flex items-start justify-between gap-2">
                         <span className="text-[15px] font-semibold leading-snug text-[var(--paper)]">
                           <span className={state === 'correct' ? 'highlight-text' : ''}>
-                            {optText}
+                            <Markdown source={optText} inline />
                           </span>
                         </span>
 
@@ -316,8 +303,8 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                             <X size={14} strokeWidth={3} />
                           </span>
                         ) : !isAnswerRevealedToMe && isSelected ? (
-                          <span className="pop rounded-full bg-[var(--peri)] px-2 py-0.5 text-[11px] font-bold text-[var(--ink)]">
-                            Locked ✓
+                          <span className="pop shrink-0 rounded-full bg-[var(--peri)] px-2 py-0.5 text-[11px] font-bold text-[var(--ink)]">
+                            Locked in ✓
                           </span>
                         ) : null}
                       </div>
@@ -345,8 +332,8 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
             })}
           </section>
 
-          {/* WAIT MODE: Waiting for others banner (after locking in, before reveal) */}
-          {room.mode === 'wait' && !room.isRevealed && hasLockedIn ? (
+          {/* WAIT MODE: Waiting for others banner (after locking in, strictly before reveal) */}
+          {room.mode === 'wait' && !isAnswerRevealedToMe && hasLockedIn ? (
             <section className="panel rise p-4">
               <div className="flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5">
@@ -355,10 +342,13 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                   </span>
                   <div>
                     <h2 className="font-display text-base font-bold">
-                      Answer locked in! Waiting for others…
+                      Locked In — Waiting for{' '}
+                      {waitingOnMembers.length > 0
+                        ? waitingOnMembers.map((m) => m.name).join(', ')
+                        : 'everyone'}
                     </h2>
                     <p className="text-xs text-[var(--muted)]">
-                      {answeredCount} of {totalMembersCount} locked in · Everyone&apos;s tags reveal together
+                      {answeredCount} of {totalMembersCount} locked in · Answers &amp; tags reveal together once everyone answers
                     </p>
                   </div>
                 </div>
@@ -384,23 +374,25 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                 </div>
               ) : null}
 
-              <div className="mt-3 flex items-center justify-end">
-                <button
-                  type="button"
-                  onClick={() => {
-                    haptic(10);
-                    void api.revealQuestion();
-                  }}
-                  className="btn-secondary !min-h-[40px] !px-3.5 text-xs"
-                >
-                  <Eye size={15} /> Reveal answers now
-                </button>
-              </div>
+              {isHost ? (
+                <div className="mt-3 flex items-center justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      haptic(10);
+                      void api.revealQuestion();
+                    }}
+                    className="btn-secondary !min-h-[40px] !px-3.5 text-xs"
+                  >
+                    <Eye size={15} /> Force Reveal Now
+                  </button>
+                </div>
+              ) : null}
             </section>
           ) : null}
 
           {/* Host Force Reveal button even before host answers if stuck waiting */}
-          {!room.isRevealed && !hasLockedIn && isHost && answeredCount > 0 ? (
+          {!isAnswerRevealedToMe && !hasLockedIn && isHost && answeredCount > 0 ? (
             <div className="flex justify-center pt-1">
               <button
                 type="button"
@@ -415,7 +407,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
             </div>
           ) : null}
 
-          {/* RACE MODE: When I answered early, show my instant score + who is still racing */}
+          {/* RACE MODE: When I answered early, show who is still racing */}
           {room.mode === 'race' && isAnswerRevealedToMe && !room.isRevealed && waitingOnMembers.length > 0 ? (
             <div className="flex items-center justify-between gap-2 rounded-2xl bg-[var(--surface)] px-4 py-2.5 text-xs shadow-[0_0_0_1px_var(--line)]">
               <span className="flex items-center gap-2 text-[var(--muted)]">
@@ -423,13 +415,15 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                 Still racing:{' '}
                 {waitingOnMembers.map((m) => `${m.avatar} ${m.name}`).join(', ')}
               </span>
-              <button
-                type="button"
-                onClick={() => void api.revealQuestion()}
-                className="font-semibold text-[var(--amber)] underline underline-offset-2"
-              >
-                Finish round
-              </button>
+              {isHost ? (
+                <button
+                  type="button"
+                  onClick={() => void api.revealQuestion()}
+                  className="font-semibold text-[var(--amber)] underline underline-offset-2"
+                >
+                  Finish round
+                </button>
+              ) : null}
             </div>
           ) : null}
 
@@ -487,7 +481,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                   </div>
                 ) : null}
 
-                {/* Why it's right (Markdown Explanation) */}
+                {/* Why it's right (Markdown + LaTeX Explanation) */}
                 <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[var(--lime)]">
                   <Sparkles size={14} />
                   <span>Explanation</span>
