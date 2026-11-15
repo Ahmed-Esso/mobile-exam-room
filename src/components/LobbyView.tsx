@@ -3,20 +3,24 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
+  AtSign,
   Check,
   ClipboardPaste,
+  Copy,
   Dices,
   Loader2,
   LogIn,
   LogOut,
+  Pencil,
   Plus,
   RotateCcw,
+  ShieldCheck,
   UserPlus,
   Users,
   X,
 } from 'lucide-react';
-import { AVATAR_OPTIONS, type UseRoomReturn } from '@/types/exam';
-import { Avatar, haptic } from './ui';
+import { AVATAR_OPTIONS, type PublicDirectoryUser, type UseRoomReturn } from '@/types/exam';
+import { Avatar, copyText, haptic } from './ui';
 import RoomLobby from './RoomLobby';
 import GoogleSignInSheet from './GoogleSignInSheet';
 import { InstallAppButton } from './InstallAppSheet';
@@ -55,8 +59,16 @@ function JoinScreen({
   const [avatarSpin, setAvatarSpin] = useState(0);
   const [codeFocused, setCodeFocused] = useState(false);
   const [signInOpen, setSignInOpen] = useState(false);
-  const [friendEmail, setFriendEmail] = useState('');
+
+  // @username editing + friend lookup
+  const [editingHandle, setEditingHandle] = useState(false);
+  const [handleInput, setHandleInput] = useState('');
+  const [savingHandle, setSavingHandle] = useState(false);
+  const [copiedHandle, setCopiedHandle] = useState(false);
+
+  const [friendInput, setFriendInput] = useState('');
   const [addingFriend, setAddingFriend] = useState(false);
+  const [suggestions, setSuggestions] = useState<PublicDirectoryUser[]>([]);
   const [pasteFeedback, setPasteFeedback] = useState<'ok' | 'none' | null>(null);
   const codeRef = useRef<HTMLInputElement>(null);
 
@@ -73,7 +85,6 @@ function JoinScreen({
     }
   }, []);
 
-  // Sync name/avatar when Google account signs in
   useEffect(() => {
     if (account) {
       if (account.name) {
@@ -81,6 +92,7 @@ function JoinScreen({
         setCustom(true);
       }
       if (account.avatar) setAvatar(account.avatar);
+      setHandleInput(account.username);
     }
   }, [account]);
 
@@ -90,6 +102,36 @@ function JoinScreen({
       setTab('join');
     }
   }, [inviteCode]);
+
+  // Live @username autocomplete lookup
+  useEffect(() => {
+    if (!account) {
+      setSuggestions([]);
+      return;
+    }
+    const q = friendInput.trim().replace(/^@+/, '').toLowerCase();
+    if (!q) {
+      setSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    const t = window.setTimeout(async () => {
+      const list = await api.searchUsersByUsername(q);
+      if (!cancelled) {
+        setSuggestions(
+          list.filter(
+            (u) =>
+              u.username !== account.username &&
+              !account.friends.some((f) => f.username === u.username)
+          )
+        );
+      }
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [friendInput, account, api]);
 
   const pickAvatar = (a: string) => {
     haptic(6);
@@ -135,15 +177,37 @@ function JoinScreen({
     window.setTimeout(() => setPasteFeedback(null), 1800);
   };
 
-  const handleAddFriend = async (e: React.FormEvent) => {
+  const handleCopyUsername = async () => {
+    if (!account) return;
+    if (await copyText(`@${account.username}`)) {
+      haptic([6, 30, 6]);
+      setCopiedHandle(true);
+      window.setTimeout(() => setCopiedHandle(false), 1600);
+    }
+  };
+
+  const handleSaveUsername = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = friendEmail.trim().toLowerCase();
+    const cleaned = handleInput.trim().replace(/^@+/, '').toLowerCase();
+    if (!cleaned) return;
+    setSavingHandle(true);
+    haptic(8);
+    const ok = await api.updateUsername(cleaned);
+    setSavingHandle(false);
+    if (ok) setEditingHandle(false);
+  };
+
+  const handleAddFriend = async (usernameToAdd: string) => {
+    const cleaned = usernameToAdd.trim().replace(/^@+/, '').toLowerCase();
     if (!cleaned) return;
     setAddingFriend(true);
     haptic(8);
-    const ok = await api.addFriendByEmail(cleaned);
+    const ok = await api.addFriendByUsername(cleaned);
     setAddingFriend(false);
-    if (ok) setFriendEmail('');
+    if (ok) {
+      setFriendInput('');
+      setSuggestions([]);
+    }
   };
 
   const cells = useMemo(() => Array.from({ length: 6 }, (_, i) => code[i] ?? ''), [code]);
@@ -169,10 +233,10 @@ function JoinScreen({
                   haptic(6);
                   api.logoutAccount();
                 }}
-                className="chip h-9 min-h-0 max-w-[155px] px-3 text-xs"
-                title={`Signed in as ${account.email}. Tap to switch to Guest mode.`}
+                className="chip h-9 min-h-0 max-w-[160px] px-3 text-xs"
+                title={`Signed in as @${account.username} (${account.email}). Tap to sign out.`}
               >
-                <span className="truncate font-semibold text-[var(--paper)]">{account.email}</span>
+                <span className="truncate font-semibold text-[var(--lime)]">@{account.username}</span>
                 <LogOut size={13} className="shrink-0 text-[var(--muted)]" />
               </button>
             ) : (
@@ -212,8 +276,8 @@ function JoinScreen({
           </h1>
           <p className="mt-3 max-w-[33ch] text-[15px] leading-relaxed text-[var(--muted)]">
             {account
-              ? `Signed in as ${account.name}. Your friends and live room invites stay synced.`
-              : 'Play right away as a guest, or sign in with Google to save friends and send 1-tap room invites.'}
+              ? `Verified as @${account.username}. Share your handle so friends can add you and send 1-tap room invites.`
+              : 'Play right away as a guest, or sign in with Google to claim your @username and add friends.'}
           </p>
         </section>
 
@@ -268,6 +332,71 @@ function JoinScreen({
               />
             </div>
           </div>
+
+          {/* @username pill when signed in with Google */}
+          {account ? (
+            <div className="mt-3 rounded-2xl bg-[var(--ink-2)] p-3 shadow-[0_0_0_1px_var(--line)]">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-1.5 text-xs">
+                  <ShieldCheck size={14} className="shrink-0 text-[var(--lime)]" />
+                  <span className="font-bold text-[var(--paper)]">@{account.username}</span>
+                  <span className="truncate text-[var(--faint)]">· {account.email}</span>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyUsername()}
+                    className="chip !h-7 !min-h-0 !px-2.5 text-[11px]"
+                    data-active={copiedHandle}
+                  >
+                    {copiedHandle ? <Check size={12} /> : <Copy size={12} />}
+                    {copiedHandle ? 'Copied' : 'Copy'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHandleInput(account.username);
+                      setEditingHandle((v) => !v);
+                    }}
+                    className="chip !h-7 !min-h-0 !px-2 text-[11px]"
+                    aria-label="Edit username"
+                  >
+                    <Pencil size={12} />
+                  </button>
+                </div>
+              </div>
+
+              {editingHandle ? (
+                <form onSubmit={handleSaveUsername} className="mt-2.5 flex gap-2">
+                  <div className="relative flex-1">
+                    <AtSign
+                      size={14}
+                      className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]"
+                    />
+                    <input
+                      type="text"
+                      value={handleInput}
+                      onChange={(e) =>
+                        setHandleInput(
+                          e.target.value.toLowerCase().replace(/[^a-z0-9_.]/g, '').slice(0, 20)
+                        )
+                      }
+                      placeholder="new_username"
+                      className="field code-cell !min-h-[40px] pl-8 text-xs"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={savingHandle || handleInput.trim().length < 3}
+                    className="btn-primary !min-h-[40px] shrink-0 !rounded-xl !px-3 text-xs"
+                  >
+                    {savingHandle ? <Loader2 size={14} className="animate-spin" /> : 'Save'}
+                  </button>
+                </form>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="no-scrollbar -mx-4 mt-4 flex gap-2 overflow-x-auto px-4 pb-1">
             {AVATAR_OPTIONS.map((a) => (
               <button
@@ -457,18 +586,32 @@ function JoinScreen({
                 </span>
               </div>
 
-              <form onSubmit={handleAddFriend} className="mt-3 flex gap-2">
-                <input
-                  type="email"
-                  inputMode="email"
-                  value={friendEmail}
-                  onChange={(e) => setFriendEmail(e.target.value)}
-                  placeholder="Add friend by Gmail (friend@gmail.com)"
-                  className="field !min-h-[44px] flex-1 text-sm"
-                />
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void handleAddFriend(friendInput);
+                }}
+                className="mt-3 flex gap-2"
+              >
+                <div className="relative flex-1">
+                  <AtSign
+                    size={15}
+                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--muted)]"
+                  />
+                  <input
+                    type="text"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    value={friendInput}
+                    onChange={(e) => setFriendInput(e.target.value)}
+                    placeholder="username (e.g. omar)"
+                    className="field !min-h-[44px] pl-9 text-sm"
+                  />
+                </div>
                 <button
                   type="submit"
-                  disabled={!friendEmail.trim() || addingFriend}
+                  disabled={!friendInput.trim() || addingFriend}
                   className="btn-secondary !min-h-[44px] shrink-0 !px-3.5 text-xs"
                 >
                   {addingFriend ? (
@@ -480,28 +623,58 @@ function JoinScreen({
                 </button>
               </form>
 
+              {/* Live @username search suggestions */}
+              {suggestions.length > 0 ? (
+                <div className="mt-2 space-y-1 rounded-2xl bg-[var(--ink-2)] p-2 shadow-[0_0_0_1px_var(--line)]">
+                  <p className="px-2 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">
+                    Matching users
+                  </p>
+                  {suggestions.slice(0, 4).map((u) => (
+                    <button
+                      key={u.username}
+                      type="button"
+                      onClick={() => void handleAddFriend(u.username)}
+                      className="press flex w-full items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-white/5"
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="text-lg">{u.avatar || '🐥'}</span>
+                        <span className="min-w-0">
+                          <span className="block truncate text-xs font-bold">{u.name}</span>
+                          <span className="block truncate text-[11px] text-[var(--lime)]">
+                            @{u.username}
+                          </span>
+                        </span>
+                      </span>
+                      <span className="chip !h-7 !min-h-0 !px-2.5 text-[11px]">+ Add</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
               {account.friends.length > 0 ? (
                 <ul className="mt-3 space-y-2">
                   {account.friends.map((f) => (
                     <li
-                      key={f.email}
+                      key={f.username}
                       className="flex items-center justify-between gap-2.5 rounded-2xl bg-[var(--ink-2)] px-3 py-2 shadow-[0_0_0_1px_var(--line)]"
                     >
                       <div className="flex min-w-0 items-center gap-2.5">
                         <Avatar emoji={f.avatar || '🐥'} size={34} />
                         <div className="min-w-0">
                           <p className="truncate text-sm font-semibold">{f.name}</p>
-                          <p className="truncate text-[11px] text-[var(--muted)]">{f.email}</p>
+                          <p className="truncate text-[11px] font-semibold text-[var(--lime)]">
+                            @{f.username}
+                          </p>
                         </div>
                       </div>
                       <button
                         type="button"
                         onClick={() => {
                           haptic(5);
-                          void api.removeFriendByEmail(f.email);
+                          void api.removeFriendByUsername(f.username);
                         }}
                         className="press rounded-full p-1.5 text-[var(--muted)] hover:text-[var(--coral)]"
-                        aria-label={`Remove ${f.name}`}
+                        aria-label={`Remove @${f.username}`}
                       >
                         <X size={14} />
                       </button>
@@ -510,7 +683,7 @@ function JoinScreen({
                 </ul>
               ) : (
                 <p className="mt-3 text-xs text-[var(--muted)]">
-                  Add a friend&apos;s Google email to invite them to any room in 1 tap.
+                  Add friends by their <strong className="text-[var(--paper)]">@username</strong> to invite them to any room in 1 tap.
                 </p>
               )}
             </>
@@ -519,7 +692,7 @@ function JoinScreen({
               <div className="min-w-0 flex-1">
                 <p className="font-display text-sm font-bold">Friends &amp; 1-Tap Room Invites</p>
                 <p className="mt-0.5 text-xs text-[var(--muted)]">
-                  Playing in Guest mode. Sign in with Google to save friends and receive live invites.
+                  Sign in with Google to get your @username, add friends, and receive live invites.
                 </p>
               </div>
               <button
@@ -530,14 +703,14 @@ function JoinScreen({
                 }}
                 className="btn-secondary !min-h-[40px] shrink-0 !px-3.5 text-xs"
               >
-                Sign in
+                Google Sign-In
               </button>
             </div>
           )}
         </section>
 
         <p className="mt-auto pt-8 text-center text-xs text-[var(--faint)]">
-          Rooms sync live across phones and clear after 4 quiet hours.
+          Swipe down anytime to refresh · Rooms clear after 4 quiet hours.
         </p>
       </div>
 
@@ -545,7 +718,6 @@ function JoinScreen({
         open={signInOpen}
         onClose={() => setSignInOpen(false)}
         api={api}
-        currentName={finalName}
         currentAvatar={avatar}
       />
     </div>

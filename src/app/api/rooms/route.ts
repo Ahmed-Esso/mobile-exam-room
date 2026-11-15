@@ -11,6 +11,7 @@ export async function POST(req: NextRequest) {
     const memberId = String(body.memberId || `user-${Date.now()}`);
     const name = String(body.name || 'Player').trim();
     const avatar = String(body.avatar || '🐥');
+    const username = typeof body.username === 'string' ? body.username : undefined;
     const email = typeof body.email === 'string' ? body.email : undefined;
     const pictureUrl =
       typeof body.pictureUrl === 'string' ? body.pictureUrl : undefined;
@@ -28,6 +29,7 @@ export async function POST(req: NextRequest) {
         memberId,
         name,
         avatar,
+        username,
         email,
         pictureUrl,
       });
@@ -47,6 +49,7 @@ export async function POST(req: NextRequest) {
       memberId,
       name,
       avatar,
+      username,
       email,
       pictureUrl,
       title,

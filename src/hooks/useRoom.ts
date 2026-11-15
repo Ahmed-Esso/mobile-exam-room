@@ -9,6 +9,7 @@ import {
   MemberAnswer,
   MemberAnswerTag,
   ParseQuestionsResult,
+  PublicDirectoryUser,
   Question,
   QuestionAttachment,
   RoomInvite,
@@ -23,7 +24,8 @@ import { mergeRoomStates } from '@/lib/room-store';
 
 const STORAGE_MEMBER_ID_KEY = 'exam_room_member_id_v2';
 const STORAGE_ACTIVE_ROOM_KEY = 'exam_room_active_code_v2';
-const STORAGE_ACCOUNT_KEY = 'exam_room_account_v3';
+const STORAGE_ACCOUNT_KEY = 'exam_room_account_v4';
+const STORAGE_GOOGLE_CLIENT_ID_KEY = 'exam_room_google_client_id_v1';
 const BROADCAST_CHANNEL_NAME = 'exam_room_live_channel_v2';
 const REACTION_TTL_MS = 6500;
 
@@ -50,6 +52,9 @@ export function useRoom(): UseRoomReturn {
   const [room, setRoom] = useState<RoomState | null>(null);
   const [memberId, setMemberId] = useState<string>('');
   const [account, setAccount] = useState<UserAccount | null>(null);
+  const [googleClientId, setGoogleClientId] = useState<string>(
+    process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || ''
+  );
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
@@ -59,6 +64,7 @@ export function useRoom(): UseRoomReturn {
   const userMqttClientRef = useRef<MqttClient | null>(null);
   const roomRef = useRef<RoomState | null>(null);
   const accountRef = useRef<UserAccount | null>(null);
+  const directoryMapRef = useRef<Map<string, PublicDirectoryUser>>(new Map());
 
   useEffect(() => {
     const id = getOrCreateLocalMemberId();
@@ -68,14 +74,28 @@ export function useRoom(): UseRoomReturn {
       const savedAcc = window.localStorage.getItem(STORAGE_ACCOUNT_KEY);
       if (savedAcc) {
         const parsed = JSON.parse(savedAcc) as UserAccount;
-        if (parsed?.email) {
+        if (parsed?.email && parsed?.username && parsed?.googleVerified) {
           setAccount(parsed);
           accountRef.current = parsed;
         }
       }
+      const savedCid = window.localStorage.getItem(STORAGE_GOOGLE_CLIENT_ID_KEY);
+      if (savedCid && !process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID) {
+        setGoogleClientId(savedCid);
+      }
     } catch {
       // Ignore storage read errors
     }
+
+    // Fetch configured Google Client ID from backend
+    fetch('/api/accounts', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.googleClientId) {
+          setGoogleClientId(data.googleClientId);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -97,13 +117,15 @@ export function useRoom(): UseRoomReturn {
     }
   }, [account]);
 
-  // Only tick every second when there are actually active reactions on screen (avoids idle re-renders)
+  // Only tick every second when there are actually active reactions on screen
   useEffect(() => {
     const timer = setInterval(() => {
       const reactions = roomRef.current?.reactions;
       if (reactions && reactions.length > 0) {
         const now = Date.now();
-        const hasRecent = reactions.some((rx) => now - rx.createdAt < REACTION_TTL_MS + 1200);
+        const hasRecent = reactions.some(
+          (rx) => now - rx.createdAt < REACTION_TTL_MS + 1200
+        );
         if (hasRecent) {
           setNowTick(now);
         }
@@ -175,11 +197,7 @@ export function useRoom(): UseRoomReturn {
 
     bc.onmessage = (event) => {
       const incoming = event.data as RoomState | undefined;
-      if (
-        incoming &&
-        incoming.code &&
-        incoming.code === roomRef.current?.code
-      ) {
+      if (incoming && incoming.code && incoming.code === roomRef.current?.code) {
         setRoom((prev) => {
           if (!prev) return incoming;
           const merged = mergeRoomStates(prev, incoming);
@@ -195,16 +213,19 @@ export function useRoom(): UseRoomReturn {
     };
   }, []);
 
-  // User-level MQTT listener + periodic account sync for live Room Invites & Friends
+  // Global MQTT user directory + live @username invites listener
   useEffect(() => {
-    const email = account?.email;
-    if (!email || typeof window === 'undefined') return;
+    if (typeof window === 'undefined') return;
 
     let cancelled = false;
-    const inviteTopic = `examroom/v2/user/${encodeURIComponent(email.toLowerCase())}/invites`;
+    const username = account?.username?.toLowerCase();
+    const inviteTopic = username
+      ? `examroom/v2/user/${encodeURIComponent(username)}/invites`
+      : null;
+    const directoryWildcard = 'examroom/v2/directory/+';
 
     const client = mqtt.connect(MQTT_BROKERS[0], {
-      clientId: `user-${Math.random().toString(36).slice(2, 10)}`,
+      clientId: `usr-${Math.random().toString(36).slice(2, 10)}`,
       clean: true,
       connectTimeout: 5000,
       reconnectPeriod: 3000,
@@ -213,23 +234,55 @@ export function useRoom(): UseRoomReturn {
 
     client.on('connect', () => {
       if (cancelled) return;
-      client.subscribe(inviteTopic, { qos: 1 });
+      const topics = inviteTopic
+        ? [inviteTopic, directoryWildcard]
+        : [directoryWildcard];
+      client.subscribe(topics, { qos: 1 });
+
+      // Publish retained user directory entry so friends on any serverless container can find this @username
+      if (account?.username && account?.email) {
+        const dirTopic = `examroom/v2/directory/${account.username.toLowerCase()}`;
+        const dirEntry: PublicDirectoryUser = {
+          username: account.username.toLowerCase(),
+          name: account.name,
+          avatar: account.avatar,
+          pictureUrl: account.pictureUrl,
+          email: account.email,
+        };
+        client.publish(dirTopic, JSON.stringify(dirEntry), {
+          qos: 1,
+          retain: true,
+        });
+      }
     });
 
     client.on('message', (topic, payload) => {
-      if (cancelled || topic !== inviteTopic) return;
+      if (cancelled) return;
       try {
-        const invite = JSON.parse(payload.toString()) as RoomInvite;
-        if (invite?.id && invite?.roomCode) {
-          setAccount((prev) => {
-            if (!prev) return prev;
-            if (prev.invites.some((i) => i.id === invite.id)) return prev;
-            return {
-              ...prev,
-              invites: [invite, ...prev.invites.filter((i) => i.roomCode !== invite.roomCode)],
-              updatedAt: Date.now(),
-            };
-          });
+        if (topic.startsWith('examroom/v2/directory/')) {
+          const entry = JSON.parse(payload.toString()) as PublicDirectoryUser;
+          if (entry?.username) {
+            directoryMapRef.current.set(entry.username.toLowerCase(), entry);
+          }
+          return;
+        }
+
+        if (inviteTopic && topic === inviteTopic) {
+          const invite = JSON.parse(payload.toString()) as RoomInvite;
+          if (invite?.id && invite?.roomCode) {
+            setAccount((prev) => {
+              if (!prev) return prev;
+              if (prev.invites.some((i) => i.id === invite.id)) return prev;
+              return {
+                ...prev,
+                invites: [
+                  invite,
+                  ...prev.invites.filter((i) => i.roomCode !== invite.roomCode),
+                ],
+                updatedAt: Date.now(),
+              };
+            });
+          }
         }
       } catch {
         // Ignore
@@ -237,13 +290,14 @@ export function useRoom(): UseRoomReturn {
     });
 
     const syncAccount = async () => {
+      if (!accountRef.current?.email) return;
       try {
         const res = await fetch('/api/accounts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'sync',
-            email,
+            email: accountRef.current.email,
             account: accountRef.current,
           }),
         });
@@ -257,7 +311,9 @@ export function useRoom(): UseRoomReturn {
       }
     };
 
-    syncAccount();
+    if (account?.email) {
+      syncAccount();
+    }
     const interval = setInterval(syncAccount, 5000);
 
     return () => {
@@ -270,7 +326,7 @@ export function useRoom(): UseRoomReturn {
       }
       userMqttClientRef.current = null;
     };
-  }, [account?.email]);
+  }, [account?.username, account?.email, account?.name, account?.avatar, account?.pictureUrl]);
 
   // Real-time MQTT over WebSockets for instant multi-phone Room sync across Vercel instances
   useEffect(() => {
@@ -441,14 +497,42 @@ export function useRoom(): UseRoomReturn {
 
   const clearError = useCallback(() => setError(null), []);
 
-  // Account & Friends actions
+  const saveGoogleClientId = useCallback(async (clientId: string) => {
+    const trimmed = clientId.trim();
+    setError(null);
+    try {
+      const res = await fetch('/api/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'setGoogleClientId',
+          clientId: trimmed,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || 'Could not save Google Client ID.');
+      }
+      setGoogleClientId(data.googleClientId || trimmed);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(
+          STORAGE_GOOGLE_CLIENT_ID_KEY,
+          data.googleClientId || trimmed
+        );
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to save Google Client ID'
+      );
+    }
+  }, []);
+
   const loginWithGoogle = useCallback(
     async (params: {
-      email: string;
-      name: string;
-      avatar: string;
-      pictureUrl?: string;
       googleCredential?: string;
+      googleAccessToken?: string;
+      username?: string;
+      avatar?: string;
     }): Promise<UserAccount | null> => {
       setIsLoading(true);
       setError(null);
@@ -463,12 +547,12 @@ export function useRoom(): UseRoomReturn {
         });
         const data = await res.json();
         if (!res.ok || !data?.account) {
-          throw new Error(data?.error || 'Could not sign in.');
+          throw new Error(data?.error || 'Google Sign-In failed.');
         }
         setAccount(data.account);
         return data.account as UserAccount;
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Sign-in failed');
+        setError(err instanceof Error ? err.message : 'Google Sign-In failed');
         return null;
       } finally {
         setIsLoading(false);
@@ -481,14 +565,86 @@ export function useRoom(): UseRoomReturn {
     setAccount(null);
   }, []);
 
-  const addFriendByEmail = useCallback(
-    async (friendEmail: string): Promise<boolean> => {
+  const updateUsername = useCallback(
+    async (newUsername: string): Promise<boolean> => {
+      const currentAcc = accountRef.current;
+      if (!currentAcc) return false;
+      setError(null);
+      try {
+        const res = await fetch('/api/accounts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'updateUsername',
+            email: currentAcc.email,
+            account: currentAcc,
+            newUsername,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.account) {
+          throw new Error(data?.error || 'Could not update username.');
+        }
+        setAccount(data.account);
+        return true;
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : 'Failed to update username'
+        );
+        return false;
+      }
+    },
+    []
+  );
+
+  const searchUsersByUsername = useCallback(
+    async (query: string): Promise<PublicDirectoryUser[]> => {
+      const clean = query.trim().toLowerCase().replace(/^@+/, '');
+      const localMatches = Array.from(directoryMapRef.current.values()).filter(
+        (u) =>
+          u.username !== accountRef.current?.username &&
+          (!clean ||
+            u.username.includes(clean) ||
+            u.name.toLowerCase().includes(clean))
+      );
+
+      try {
+        const res = await fetch(
+          `/api/accounts?q=${encodeURIComponent(clean)}`,
+          { cache: 'no-store' }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          const serverUsers: PublicDirectoryUser[] = Array.isArray(data?.users)
+            ? data.users
+            : [];
+          const mergedMap = new Map<string, PublicDirectoryUser>();
+          for (const u of [...localMatches, ...serverUsers]) {
+            if (u.username && u.username !== accountRef.current?.username) {
+              mergedMap.set(u.username, u);
+            }
+          }
+          return Array.from(mergedMap.values()).slice(0, 12);
+        }
+      } catch {
+        // Fallback to local MQTT directory
+      }
+      return localMatches.slice(0, 12);
+    },
+    []
+  );
+
+  const addFriendByUsername = useCallback(
+    async (friendUsername: string): Promise<boolean> => {
       const currentAcc = accountRef.current;
       if (!currentAcc) {
-        setError('Sign in with your Google account to add friends.');
+        setError('Sign in with Google first to add friends by @username.');
         return false;
       }
       setError(null);
+      const clean = friendUsername.trim().replace(/^@+/, '').toLowerCase();
+      const directoryMatch = directoryMapRef.current.get(clean);
+
       try {
         const res = await fetch('/api/accounts', {
           method: 'POST',
@@ -496,10 +652,10 @@ export function useRoom(): UseRoomReturn {
           body: JSON.stringify({
             action: 'addFriend',
             email: currentAcc.email,
-            name: currentAcc.name,
-            avatar: currentAcc.avatar,
+            username: currentAcc.username,
             account: currentAcc,
-            friendEmail,
+            friendUsername: clean,
+            directoryMatch,
           }),
         });
         const data = await res.json();
@@ -516,46 +672,51 @@ export function useRoom(): UseRoomReturn {
     []
   );
 
-  const removeFriendByEmail = useCallback(async (friendEmail: string) => {
-    const currentAcc = accountRef.current;
-    if (!currentAcc) return;
-    try {
-      const res = await fetch('/api/accounts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'removeFriend',
-          email: currentAcc.email,
-          friendEmail,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok && data?.account) {
-        setAccount(data.account);
+  const removeFriendByUsername = useCallback(
+    async (friendUsername: string) => {
+      const currentAcc = accountRef.current;
+      if (!currentAcc) return;
+      try {
+        const res = await fetch('/api/accounts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'removeFriend',
+            email: currentAcc.email,
+            friendUsername,
+          }),
+        });
+        const data = await res.json();
+        if (res.ok && data?.account) {
+          setAccount(data.account);
+        }
+      } catch {
+        // Ignore
       }
-    } catch {
-      // Ignore
-    }
-  }, []);
+    },
+    []
+  );
 
   const inviteFriendToRoom = useCallback(
-    async (friendEmail: string): Promise<boolean> => {
+    async (friendUsername: string): Promise<boolean> => {
       const currentAcc = accountRef.current;
       const currentRoom = roomRef.current;
       if (!currentAcc || !currentRoom) {
         setError('Sign in and enter a room before inviting friends.');
         return false;
       }
+      const cleanTo = friendUsername.trim().replace(/^@+/, '').toLowerCase();
       try {
         const res = await fetch('/api/accounts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'sendInvite',
+            fromUsername: currentAcc.username,
             fromEmail: currentAcc.email,
             fromName: currentAcc.name,
             fromAvatar: currentAcc.avatar,
-            toEmail: friendEmail,
+            toUsername: cleanTo,
             roomCode: currentRoom.code,
             roomTitle: currentRoom.title,
           }),
@@ -565,11 +726,10 @@ export function useRoom(): UseRoomReturn {
           throw new Error(data?.error || 'Could not send invite.');
         }
 
-        // Also broadcast live over MQTT user invite topic so friend gets instant popup
         const client = userMqttClientRef.current || mqttClientRef.current;
         if (client && client.connected) {
           const inviteTopic = `examroom/v2/user/${encodeURIComponent(
-            friendEmail.trim().toLowerCase()
+            cleanTo
           )}/invites`;
           client.publish(inviteTopic, JSON.stringify(data.invite), {
             qos: 1,
@@ -612,6 +772,58 @@ export function useRoom(): UseRoomReturn {
     }
   }, []);
 
+  const refreshRoomAndAccount = useCallback(async () => {
+    const activeMemberId = memberId || getOrCreateLocalMemberId();
+    const tasks: Promise<void>[] = [];
+
+    if (roomRef.current?.code) {
+      const code = roomRef.current.code;
+      tasks.push(
+        fetch(`/api/rooms/${encodeURIComponent(code)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({
+            action: 'sync',
+            memberId: activeMemberId,
+            fallbackRoom: roomRef.current,
+          }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            if (data?.room) {
+              applyAndBroadcastRoom(data.room, true);
+            }
+          })
+          .catch(() => {})
+      );
+    }
+
+    if (accountRef.current?.email) {
+      tasks.push(
+        fetch('/api/accounts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({
+            action: 'sync',
+            email: accountRef.current.email,
+            account: accountRef.current,
+          }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            if (data?.account) {
+              setAccount(data.account);
+            }
+          })
+          .catch(() => {})
+      );
+    }
+
+    await Promise.all(tasks);
+  }, [memberId, applyAndBroadcastRoom]);
+
   const createRoom = useCallback(
     async (params: {
       name: string;
@@ -633,6 +845,7 @@ export function useRoom(): UseRoomReturn {
             memberId: activeMemberId,
             name: params.name,
             avatar: params.avatar,
+            username: accountRef.current?.username,
             email: accountRef.current?.email,
             pictureUrl: accountRef.current?.pictureUrl,
             title: params.title,
@@ -686,6 +899,7 @@ export function useRoom(): UseRoomReturn {
             memberId: activeMemberId,
             name: params.name,
             avatar: params.avatar,
+            username: accountRef.current?.username,
             email: accountRef.current?.email,
             pictureUrl: accountRef.current?.pictureUrl,
           }),
@@ -738,7 +952,8 @@ export function useRoom(): UseRoomReturn {
           departingRoom.status === 'active'
             ? departingRoom.mode === 'wait'
               ? allRemainingAnswered
-              : departingRoom.forceRevealedQuestionIndex === qIdx || allRemainingAnswered
+              : departingRoom.forceRevealedQuestionIndex === qIdx ||
+                allRemainingAnswered
             : departingRoom.isRevealed,
         version: departingRoom.version + 1,
         updatedAt: Date.now(),
@@ -810,7 +1025,10 @@ export function useRoom(): UseRoomReturn {
 
   const toggleReady = useCallback(
     async (ready?: boolean) => {
-      await postRoomAction('toggleReady', typeof ready === 'boolean' ? { ready } : {});
+      await postRoomAction(
+        'toggleReady',
+        typeof ready === 'boolean' ? { ready } : {}
+      );
     },
     [postRoomAction]
   );
@@ -854,7 +1072,10 @@ export function useRoom(): UseRoomReturn {
           error?: string;
         };
         if (!res.ok || !data.questions || data.questions.length === 0) {
-          if (params.markdown && (!params.attachments || params.attachments.length === 0)) {
+          if (
+            params.markdown &&
+            (!params.attachments || params.attachments.length === 0)
+          ) {
             const fallback = parseMarkdownQuestions(params.markdown);
             if (fallback.questions.length > 0) {
               if (roomRef.current?.code) {
@@ -888,7 +1109,10 @@ export function useRoom(): UseRoomReturn {
 
   const startExam = useCallback(
     async (modeOverride?: GameMode) => {
-      await postRoomAction('startExam', modeOverride ? { mode: modeOverride } : {});
+      await postRoomAction(
+        'startExam',
+        modeOverride ? { mode: modeOverride } : {}
+      );
     },
     [postRoomAction]
   );
@@ -971,13 +1195,17 @@ export function useRoom(): UseRoomReturn {
   const nextReadyCount = useMemo<number>(() => {
     if (!room || room.status !== 'active') return 0;
     const qIdx = room.currentQuestionIndex;
-    return room.members.filter((m) => (m.readyForNextQuestionIndex ?? -1) >= qIdx).length;
+    return room.members.filter(
+      (m) => (m.readyForNextQuestionIndex ?? -1) >= qIdx
+    ).length;
   }, [room]);
 
   const waitingOnNextMembers = useMemo<Member[]>(() => {
     if (!room || room.status !== 'active') return [];
     const qIdx = room.currentQuestionIndex;
-    return room.members.filter((m) => (m.readyForNextQuestionIndex ?? -1) < qIdx);
+    return room.members.filter(
+      (m) => (m.readyForNextQuestionIndex ?? -1) < qIdx
+    );
   }, [room]);
 
   const currentQuestion = useMemo<Question | null>(() => {
@@ -999,7 +1227,6 @@ export function useRoom(): UseRoomReturn {
       room.members.every((m) => m.answers[qIdx] !== undefined);
 
     if (room.mode === 'wait') {
-      // Strictly never reveal early in Wait mode
       return allMembersAnswered;
     }
 
@@ -1127,12 +1354,17 @@ export function useRoom(): UseRoomReturn {
     leaderboard,
     activeReactions,
     account,
+    googleClientId,
+    saveGoogleClientId,
     loginWithGoogle,
     logoutAccount,
-    addFriendByEmail,
-    removeFriendByEmail,
+    updateUsername,
+    searchUsersByUsername,
+    addFriendByUsername,
+    removeFriendByUsername,
     inviteFriendToRoom,
     dismissRoomInvite,
+    refreshRoomAndAccount,
     createRoom,
     joinRoom,
     leaveRoom,

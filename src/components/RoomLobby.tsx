@@ -51,8 +51,8 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
   const [studioOpen, setStudioOpen] = useState(false);
   const [starting, setStarting] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
-  const [invitedEmails, setInvitedEmails] = useState<Record<string, boolean>>({});
-  const [invitingEmail, setInvitingEmail] = useState<string | null>(null);
+  const [invitedUsernames, setInvitedUsernames] = useState<Record<string, boolean>>({});
+  const [invitingUsername, setInvitingUsername] = useState<string | null>(null);
 
   const inviteUrl = useMemo(() => {
     if (!room || typeof window === 'undefined') return '';
@@ -98,13 +98,13 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
     setStarting(false);
   };
 
-  const sendFriendInvite = async (friendEmail: string) => {
-    setInvitingEmail(friendEmail);
+  const sendFriendInvite = async (friendUsername: string) => {
+    setInvitingUsername(friendUsername);
     haptic(8);
-    const ok = await api.inviteFriendToRoom(friendEmail);
-    setInvitingEmail(null);
+    const ok = await api.inviteFriendToRoom(friendUsername);
+    setInvitingUsername(null);
     if (ok) {
-      setInvitedEmails((prev) => ({ ...prev, [friendEmail]: true }));
+      setInvitedUsernames((prev) => ({ ...prev, [friendUsername]: true }));
     }
   };
 
@@ -257,21 +257,23 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                 <div className="no-scrollbar -mx-4 flex gap-2 overflow-x-auto px-4">
                   {account.friends.map((f) => {
                     const alreadyInRoom = room.members.some(
-                      (m) => m.email?.toLowerCase() === f.email.toLowerCase()
+                      (m) =>
+                        (m.username && m.username.toLowerCase() === f.username.toLowerCase()) ||
+                        (m.email && f.email && m.email.toLowerCase() === f.email.toLowerCase())
                     );
-                    const invited = invitedEmails[f.email];
-                    const sending = invitingEmail === f.email;
+                    const invited = invitedUsernames[f.username];
+                    const sending = invitingUsername === f.username;
                     return (
                       <button
-                        key={f.email}
+                        key={f.username}
                         type="button"
                         disabled={alreadyInRoom || sending}
-                        onClick={() => void sendFriendInvite(f.email)}
+                        onClick={() => void sendFriendInvite(f.username)}
                         className="chip shrink-0 text-xs"
                         data-active={invited}
                       >
                         <span>{f.avatar || '🐥'}</span>
-                        <span className="max-w-[90px] truncate">{f.name}</span>
+                        <span className="max-w-[100px] truncate">@{f.username}</span>
                         {alreadyInRoom ? (
                           <span className="text-[10px] text-[var(--lime)]">In room</span>
                         ) : sending ? (

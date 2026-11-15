@@ -44,6 +44,7 @@ export interface Member {
   id: string;
   name: string;
   avatar: string;
+  username?: string;
   email?: string;
   pictureUrl?: string;
   isHost: boolean;
@@ -153,16 +154,27 @@ export interface SendReactionInput {
   questionIndex?: number;
 }
 
-export interface FriendEntry {
-  email: string;
+export interface PublicDirectoryUser {
+  username: string;
   name: string;
   avatar: string;
+  pictureUrl?: string;
+  email?: string;
+}
+
+export interface FriendEntry {
+  username: string;
+  email?: string;
+  name: string;
+  avatar: string;
+  pictureUrl?: string;
   addedAt: number;
 }
 
 export interface RoomInvite {
   id: string;
-  fromEmail: string;
+  fromUsername: string;
+  fromEmail?: string;
   fromName: string;
   fromAvatar: string;
   roomCode: string;
@@ -171,10 +183,12 @@ export interface RoomInvite {
 }
 
 export interface UserAccount {
+  username: string;
   email: string;
   name: string;
   avatar: string;
   pictureUrl?: string;
+  googleVerified?: boolean;
   friends: FriendEntry[];
   invites: RoomInvite[];
   updatedAt: number;
@@ -214,20 +228,24 @@ export interface UseRoomReturn {
   leaderboard: Member[];
   activeReactions: EmojiReaction[];
 
-  // Account & Friends state & actions
+  // Google OAuth Account, @username Friends & Live Room Invites
   account: UserAccount | null;
+  googleClientId: string;
+  saveGoogleClientId: (clientId: string) => Promise<void>;
   loginWithGoogle: (params: {
-    email: string;
-    name: string;
-    avatar: string;
-    pictureUrl?: string;
     googleCredential?: string;
+    googleAccessToken?: string;
+    username?: string;
+    avatar?: string;
   }) => Promise<UserAccount | null>;
   logoutAccount: () => void;
-  addFriendByEmail: (friendEmail: string) => Promise<boolean>;
-  removeFriendByEmail: (friendEmail: string) => Promise<void>;
-  inviteFriendToRoom: (friendEmail: string) => Promise<boolean>;
+  updateUsername: (newUsername: string) => Promise<boolean>;
+  searchUsersByUsername: (query: string) => Promise<PublicDirectoryUser[]>;
+  addFriendByUsername: (friendUsername: string) => Promise<boolean>;
+  removeFriendByUsername: (friendUsername: string) => Promise<void>;
+  inviteFriendToRoom: (friendUsername: string) => Promise<boolean>;
   dismissRoomInvite: (inviteId: string) => Promise<void>;
+  refreshRoomAndAccount: () => Promise<void>;
 
   // Room Lifecycle & Actions
   createRoom: (params: {

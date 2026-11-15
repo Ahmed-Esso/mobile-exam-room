@@ -538,6 +538,7 @@ export function createRoomInStore(params: {
   memberId: string;
   name: string;
   avatar: string;
+  username?: string;
   email?: string;
   pictureUrl?: string;
   title?: string;
@@ -552,6 +553,7 @@ export function createRoomInStore(params: {
     id: params.memberId,
     name: params.name.trim() || 'Player 1',
     avatar: params.avatar || '🐥',
+    username: params.username?.trim().toLowerCase(),
     email: params.email?.trim().toLowerCase(),
     pictureUrl: params.pictureUrl,
     isHost: true,
@@ -606,6 +608,7 @@ export function joinRoomInStore(params: {
   memberId: string;
   name: string;
   avatar: string;
+  username?: string;
   email?: string;
   pictureUrl?: string;
 }): RoomState | null {
@@ -621,6 +624,7 @@ export function joinRoomInStore(params: {
       id: params.memberId,
       name: params.name.trim() || 'Player',
       avatar: params.avatar || '🐥',
+      username: params.username?.trim().toLowerCase(),
       email: params.email?.trim().toLowerCase(),
       pictureUrl: params.pictureUrl,
       isHost: false,
@@ -672,6 +676,7 @@ export function joinRoomInStore(params: {
   if (existing) {
     existing.name = params.name.trim() || existing.name;
     existing.avatar = params.avatar || existing.avatar;
+    if (params.username) existing.username = params.username.trim().toLowerCase();
     if (params.email) existing.email = params.email.trim().toLowerCase();
     if (params.pictureUrl) existing.pictureUrl = params.pictureUrl;
     existing.lastSeenAt = now;
@@ -680,6 +685,7 @@ export function joinRoomInStore(params: {
       id: params.memberId,
       name: params.name.trim() || `Player ${room.members.length + 1}`,
       avatar: params.avatar || '🐥',
+      username: params.username?.trim().toLowerCase(),
       email: params.email?.trim().toLowerCase(),
       pictureUrl: params.pictureUrl,
       isHost: false,

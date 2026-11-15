@@ -7,6 +7,7 @@ import LobbyView from '@/components/LobbyView';
 import ExamArenaView from '@/components/ExamArenaView';
 import ResultsView from '@/components/ResultsView';
 import EmojiReactionOverlay from '@/components/EmojiReactionOverlay';
+import PullToRefresh from '@/components/PullToRefresh';
 import { AVATAR_OPTIONS, type RoomInvite } from '@/types/exam';
 import { autoName, readProfile } from '@/components/profile';
 import { haptic } from '@/components/ui';
@@ -59,6 +60,14 @@ export default function HomePage() {
     });
   };
 
+  const handlePullRefresh = async () => {
+    if (room || account) {
+      await api.refreshRoomAndAccount();
+    } else if (typeof window !== 'undefined') {
+      window.location.reload();
+    }
+  };
+
   return (
     <main className="stage">
       <div className="phone" data-mode={room?.mode ?? 'wait'}>
@@ -72,7 +81,7 @@ export default function HomePage() {
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-xs font-bold text-[var(--paper)]">
-                    {latestInvite.fromName} invited you to Room{' '}
+                    @{latestInvite.fromUsername} invited you to Room{' '}
                     <span className="code-cell text-[var(--lime)]">{latestInvite.roomCode}</span>
                   </p>
                   <p className="truncate text-[11px] text-[var(--muted)]">
@@ -120,14 +129,16 @@ export default function HomePage() {
             </div>
           ) : null}
 
-          {/* Screen router */}
-          {!room || room.status === 'lobby' ? (
-            <LobbyView api={api} inviteCode={inviteCode} rejoinCode={rejoinCode} />
-          ) : room.status === 'active' ? (
-            <ExamArenaView api={api} />
-          ) : (
-            <ResultsView api={api} />
-          )}
+          {/* Screen router wrapped with PullToRefresh */}
+          <PullToRefresh onRefresh={handlePullRefresh}>
+            {!room || room.status === 'lobby' ? (
+              <LobbyView api={api} inviteCode={inviteCode} rejoinCode={rejoinCode} />
+            ) : room.status === 'active' ? (
+              <ExamArenaView api={api} />
+            ) : (
+              <ResultsView api={api} />
+            )}
+          </PullToRefresh>
 
           {/* Global Zoom/Teams & Contextual Floating Reaction Overlay */}
           {room ? (
