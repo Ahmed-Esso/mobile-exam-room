@@ -24,6 +24,7 @@ import {
 import type { GameMode, UseRoomReturn } from '@/types/exam';
 import { Avatar, Markdown, copyText, haptic } from './ui';
 import MarkdownQuestionModal from './MarkdownQuestionModal';
+import { InstallAppButton } from './InstallAppSheet';
 
 const TIMES = [0, 15, 30, 45, 60, 90];
 
@@ -117,7 +118,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
       <div className="scroll-area">
         <div className="pt-safe px-5 pb-6">
           {/* Top bar */}
-          <header className="flex items-center justify-between gap-3 pt-1">
+          <header className="flex items-center justify-between gap-2 pt-1">
             <button
               type="button"
               className="press flex h-10 items-center gap-2 rounded-full bg-[var(--surface-2)] px-3.5 text-sm font-medium text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]"
@@ -133,10 +134,13 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
               <LogOut size={16} />
               {confirmLeave ? 'Tap again to leave' : 'Leave'}
             </button>
-            <span className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-3 py-1.5 text-xs font-semibold text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
-              <span className="live-dot h-1.5 w-1.5 rounded-full bg-[var(--lime)]" />
-              Lobby · {playerCount} {playerCount === 1 ? 'player' : 'players'}
-            </span>
+            <div className="flex items-center gap-1.5">
+              <InstallAppButton compact />
+              <span className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-3 py-1.5 text-xs font-semibold text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
+                <span className="live-dot h-1.5 w-1.5 rounded-full bg-[var(--lime)]" />
+                {playerCount} {playerCount === 1 ? 'player' : 'players'}
+              </span>
+            </div>
           </header>
 
           {/* Room code hero */}

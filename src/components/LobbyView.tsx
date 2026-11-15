@@ -19,6 +19,7 @@ import { AVATAR_OPTIONS, type UseRoomReturn } from '@/types/exam';
 import { Avatar, haptic } from './ui';
 import RoomLobby from './RoomLobby';
 import GoogleSignInSheet from './GoogleSignInSheet';
+import { InstallAppButton } from './InstallAppSheet';
 import { ANIMAL_NAMES, autoName, extractRoomCode, readProfile, saveProfile } from './profile';
 
 export default function LobbyView({
@@ -150,7 +151,7 @@ function JoinScreen({
   return (
     <div className="scroll-area">
       <div className="pt-safe flex min-h-full flex-col px-5 pb-8">
-        {/* Wordmark + Account Switcher */}
+        {/* Wordmark + Install + Account Switcher */}
         <header className="flex items-center justify-between gap-2 pt-2">
           <div className="flex items-center gap-2">
             <span className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-[var(--lime)] font-display text-lg font-extrabold text-[var(--ink)] shadow-[inset_0_-2px_0_rgba(0,0,0,0.2)]">
@@ -159,32 +160,35 @@ function JoinScreen({
             <span className="font-display text-[17px] font-bold">exam room</span>
           </div>
 
-          {account ? (
-            <button
-              type="button"
-              onClick={() => {
-                haptic(6);
-                api.logoutAccount();
-              }}
-              className="chip h-9 min-h-0 max-w-[190px] px-3 text-xs"
-              title={`Signed in as ${account.email}. Tap to switch to Guest mode.`}
-            >
-              <span className="truncate font-semibold text-[var(--paper)]">{account.email}</span>
-              <LogOut size={13} className="shrink-0 text-[var(--muted)]" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => {
-                haptic(6);
-                setSignInOpen(true);
-              }}
-              className="chip h-9 min-h-0 px-3 text-xs"
-            >
-              <span className="h-2 w-2 rounded-full bg-[var(--lime)]" />
-              Sign in with Google
-            </button>
-          )}
+          <div className="flex items-center gap-1.5">
+            <InstallAppButton compact />
+            {account ? (
+              <button
+                type="button"
+                onClick={() => {
+                  haptic(6);
+                  api.logoutAccount();
+                }}
+                className="chip h-9 min-h-0 max-w-[155px] px-3 text-xs"
+                title={`Signed in as ${account.email}. Tap to switch to Guest mode.`}
+              >
+                <span className="truncate font-semibold text-[var(--paper)]">{account.email}</span>
+                <LogOut size={13} className="shrink-0 text-[var(--muted)]" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  haptic(6);
+                  setSignInOpen(true);
+                }}
+                className="chip h-9 min-h-0 px-3 text-xs"
+              >
+                <span className="h-2 w-2 rounded-full bg-[var(--lime)]" />
+                Sign in
+              </button>
+            )}
+          </div>
         </header>
 
         {/* Headline */}

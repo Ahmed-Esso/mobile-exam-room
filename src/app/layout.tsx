@@ -26,9 +26,17 @@ export const metadata: Metadata = {
   description:
     'Spin up a room, share a 6-letter code, and take an exam together from your phones, with live answer tags, emoji reactions and a podium at the end.',
   applicationName: 'Exam Room',
+  manifest: '/manifest.webmanifest',
   icons: {
-    icon: [{ url: '/icon.svg', type: 'image/svg+xml' }],
-    apple: [{ url: '/apple-icon', sizes: '180x180', type: 'image/png' }],
+    icon: [
+      { url: '/icon.svg', type: 'image/svg+xml' },
+      { url: '/api/pwa-icon?size=192', sizes: '192x192', type: 'image/png' },
+      { url: '/api/pwa-icon?size=512', sizes: '512x512', type: 'image/png' },
+    ],
+    apple: [
+      { url: '/apple-icon', sizes: '180x180', type: 'image/png' },
+      { url: '/api/pwa-icon?size=180', sizes: '180x180', type: 'image/png' },
+    ],
   },
   appleWebApp: {
     capable: true,
