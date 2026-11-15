@@ -552,24 +552,31 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
 
                 {/* Next Question / Podium Action */}
                 <div className="mt-4">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      haptic([10, 30, 10]);
-                      void api.nextQuestion();
-                    }}
-                    className="btn-primary h-13 w-full text-base"
-                  >
-                    {isLastQuestion ? (
-                      <>
-                        <Trophy size={19} /> See Final Podium
-                      </>
-                    ) : (
-                      <>
-                        Next Question ({qIdx + 2} of {totalQ}) <ArrowRight size={19} />
-                      </>
-                    )}
-                  </button>
+                  {room.mode === 'race' && !room.isRevealed && !isHost ? (
+                    <div className="flex h-13 items-center justify-center gap-2 rounded-2xl bg-[var(--ink-2)] px-4 text-xs font-semibold text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
+                      <Hourglass size={15} className="text-[var(--amber)]" />
+                      <span>Waiting for friends to finish this question…</span>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        haptic([10, 30, 10]);
+                        void api.nextQuestion();
+                      }}
+                      className="btn-primary h-13 w-full text-base"
+                    >
+                      {isLastQuestion ? (
+                        <>
+                          <Trophy size={19} /> See Final Podium
+                        </>
+                      ) : (
+                        <>
+                          Next Question ({qIdx + 2} of {totalQ}) <ArrowRight size={19} />
+                        </>
+                      )}
+                    </button>
+                  )}
                 </div>
               </section>
             </div>

@@ -177,12 +177,14 @@ export function useRoom(): UseRoomReturn {
       client.on('connect', () => {
         if (isCancelled) return;
         client.subscribe([stateTopic, pingTopic], { qos: 1 }, () => {
-          // Immediately broadcast our current state and send a ping so all connected phones exchange & merge states
+          // Always ping so live peers reply; only publish retained state if we have an authoritative hostId
           if (roomRef.current && roomRef.current.code === code) {
-            client.publish(stateTopic, JSON.stringify(roomRef.current), {
-              qos: 1,
-              retain: true,
-            });
+            if (roomRef.current.hostId !== '') {
+              client.publish(stateTopic, JSON.stringify(roomRef.current), {
+                qos: 1,
+                retain: true,
+              });
+            }
             client.publish(
               pingTopic,
               JSON.stringify({
@@ -421,6 +423,52 @@ export function useRoom(): UseRoomReturn {
   );
 
   const leaveRoom = useCallback(() => {
+    const departingRoom = roomRef.current;
+    const activeMemberId = memberId || getOrCreateLocalMemberId();
+
+    if (departingRoom?.code && activeMemberId && departingRoom.members.length > 1) {
+      const remainingMembers = departingRoom.members.filter(
+        (m) => m.id !== activeMemberId
+      );
+      const qIdx = departingRoom.currentQuestionIndex;
+      const allRemainingAnswered =
+        remainingMembers.length > 0 &&
+        remainingMembers.every((m) => m.answers[qIdx] !== undefined);
+
+      const updatedRoom: RoomState = {
+        ...departingRoom,
+        kickedMemberIds: Array.from(
+          new Set([...(departingRoom.kickedMemberIds || []), activeMemberId])
+        ),
+        members: remainingMembers,
+        isRevealed:
+          departingRoom.status === 'active'
+            ? departingRoom.forceRevealedQuestionIndex === qIdx || allRemainingAnswered
+            : departingRoom.isRevealed,
+        version: departingRoom.version + 1,
+        updatedAt: Date.now(),
+      };
+
+      publishMqttState(updatedRoom);
+      try {
+        channelRef.current?.postMessage(updatedRoom);
+      } catch {
+        // Ignore
+      }
+
+      void fetch(`/api/rooms/${encodeURIComponent(departingRoom.code)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          action: 'removeMember',
+          memberId: activeMemberId,
+          targetMemberId: activeMemberId,
+          fallbackRoom: departingRoom,
+        }),
+      }).catch(() => {});
+    }
+
     if (mqttClientRef.current) {
       try {
         mqttClientRef.current.end(true);
@@ -431,7 +479,7 @@ export function useRoom(): UseRoomReturn {
     }
     applyAndBroadcastRoom(null, false);
     setError(null);
-  }, [applyAndBroadcastRoom]);
+  }, [memberId, publishMqttState, applyAndBroadcastRoom]);
 
   const postRoomAction = useCallback(
     async (action: string, payload: Record<string, unknown> = {}) => {
