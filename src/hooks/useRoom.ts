@@ -11,16 +11,19 @@ import {
   ParseQuestionsResult,
   Question,
   QuestionAttachment,
+  RoomInvite,
   RoomSettingsUpdate,
   RoomState,
   SendReactionInput,
   UseRoomReturn,
+  UserAccount,
 } from '@/types/exam';
 import { parseMarkdownQuestions } from '@/lib/markdown-parser';
 import { mergeRoomStates } from '@/lib/room-store';
 
 const STORAGE_MEMBER_ID_KEY = 'exam_room_member_id_v2';
 const STORAGE_ACTIVE_ROOM_KEY = 'exam_room_active_code_v2';
+const STORAGE_ACCOUNT_KEY = 'exam_room_account_v3';
 const BROADCAST_CHANNEL_NAME = 'exam_room_live_channel_v2';
 const REACTION_TTL_MS = 6500;
 
@@ -46,27 +49,65 @@ function getOrCreateLocalMemberId(): string {
 export function useRoom(): UseRoomReturn {
   const [room, setRoom] = useState<RoomState | null>(null);
   const [memberId, setMemberId] = useState<string>('');
+  const [account, setAccount] = useState<UserAccount | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
 
   const channelRef = useRef<BroadcastChannel | null>(null);
   const mqttClientRef = useRef<MqttClient | null>(null);
+  const userMqttClientRef = useRef<MqttClient | null>(null);
   const roomRef = useRef<RoomState | null>(null);
+  const accountRef = useRef<UserAccount | null>(null);
 
   useEffect(() => {
     const id = getOrCreateLocalMemberId();
     setMemberId(id);
+
+    try {
+      const savedAcc = window.localStorage.getItem(STORAGE_ACCOUNT_KEY);
+      if (savedAcc) {
+        const parsed = JSON.parse(savedAcc) as UserAccount;
+        if (parsed?.email) {
+          setAccount(parsed);
+          accountRef.current = parsed;
+        }
+      }
+    } catch {
+      // Ignore storage read errors
+    }
   }, []);
 
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
 
-  // Periodic tick to expire old floating reactions smoothly
+  useEffect(() => {
+    accountRef.current = account;
+    if (typeof window !== 'undefined') {
+      try {
+        if (account) {
+          window.localStorage.setItem(STORAGE_ACCOUNT_KEY, JSON.stringify(account));
+        } else {
+          window.localStorage.removeItem(STORAGE_ACCOUNT_KEY);
+        }
+      } catch {
+        // Ignore storage write errors
+      }
+    }
+  }, [account]);
+
+  // Only tick every second when there are actually active reactions on screen (avoids idle re-renders)
   useEffect(() => {
     const timer = setInterval(() => {
-      setNowTick(Date.now());
+      const reactions = roomRef.current?.reactions;
+      if (reactions && reactions.length > 0) {
+        const now = Date.now();
+        const hasRecent = reactions.some((rx) => now - rx.createdAt < REACTION_TTL_MS + 1200);
+        if (hasRecent) {
+          setNowTick(now);
+        }
+      }
     }, 1000);
     return () => clearInterval(timer);
   }, []);
@@ -154,7 +195,84 @@ export function useRoom(): UseRoomReturn {
     };
   }, []);
 
-  // Setup real-time MQTT over WebSockets for instant multi-phone sync across Vercel instances
+  // User-level MQTT listener + periodic account sync for live Room Invites & Friends
+  useEffect(() => {
+    const email = account?.email;
+    if (!email || typeof window === 'undefined') return;
+
+    let cancelled = false;
+    const inviteTopic = `examroom/v2/user/${encodeURIComponent(email.toLowerCase())}/invites`;
+
+    const client = mqtt.connect(MQTT_BROKERS[0], {
+      clientId: `user-${Math.random().toString(36).slice(2, 10)}`,
+      clean: true,
+      connectTimeout: 5000,
+      reconnectPeriod: 3000,
+    });
+    userMqttClientRef.current = client;
+
+    client.on('connect', () => {
+      if (cancelled) return;
+      client.subscribe(inviteTopic, { qos: 1 });
+    });
+
+    client.on('message', (topic, payload) => {
+      if (cancelled || topic !== inviteTopic) return;
+      try {
+        const invite = JSON.parse(payload.toString()) as RoomInvite;
+        if (invite?.id && invite?.roomCode) {
+          setAccount((prev) => {
+            if (!prev) return prev;
+            if (prev.invites.some((i) => i.id === invite.id)) return prev;
+            return {
+              ...prev,
+              invites: [invite, ...prev.invites.filter((i) => i.roomCode !== invite.roomCode)],
+              updatedAt: Date.now(),
+            };
+          });
+        }
+      } catch {
+        // Ignore
+      }
+    });
+
+    const syncAccount = async () => {
+      try {
+        const res = await fetch('/api/accounts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'sync',
+            email,
+            account: accountRef.current,
+          }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && data?.account) {
+          setAccount(data.account);
+        }
+      } catch {
+        // Ignore
+      }
+    };
+
+    syncAccount();
+    const interval = setInterval(syncAccount, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      try {
+        client.end(true);
+      } catch {
+        // Ignore
+      }
+      userMqttClientRef.current = null;
+    };
+  }, [account?.email]);
+
+  // Real-time MQTT over WebSockets for instant multi-phone Room sync across Vercel instances
   useEffect(() => {
     const code = room?.code;
     if (!code || typeof window === 'undefined') return;
@@ -177,7 +295,6 @@ export function useRoom(): UseRoomReturn {
       client.on('connect', () => {
         if (isCancelled) return;
         client.subscribe([stateTopic, pingTopic], { qos: 1 }, () => {
-          // Always ping so live peers reply; only publish retained state if we have an authoritative hostId
           if (roomRef.current && roomRef.current.code === code) {
             if (roomRef.current.hostId !== '') {
               client.publish(stateTopic, JSON.stringify(roomRef.current), {
@@ -205,7 +322,8 @@ export function useRoom(): UseRoomReturn {
             if (
               pingData?.sender !== getOrCreateLocalMemberId() &&
               roomRef.current &&
-              roomRef.current.code === code
+              roomRef.current.code === code &&
+              roomRef.current.hostId !== ''
             ) {
               client.publish(stateTopic, JSON.stringify(roomRef.current), {
                 qos: 1,
@@ -228,10 +346,10 @@ export function useRoom(): UseRoomReturn {
               const merged = mergeRoomStates(prev, incoming);
               roomRef.current = merged;
 
-              // If merging discovered new members that the incoming payload didn't have, re-broadcast merged union
               if (
-                merged.members.length > incoming.members.length ||
-                merged.members.length > prevMemberCount
+                merged.hostId !== '' &&
+                (merged.members.length > incoming.members.length ||
+                  merged.members.length > prevMemberCount)
               ) {
                 try {
                   client.publish(stateTopic, JSON.stringify(merged), {
@@ -323,6 +441,177 @@ export function useRoom(): UseRoomReturn {
 
   const clearError = useCallback(() => setError(null), []);
 
+  // Account & Friends actions
+  const loginWithGoogle = useCallback(
+    async (params: {
+      email: string;
+      name: string;
+      avatar: string;
+      pictureUrl?: string;
+      googleCredential?: string;
+    }): Promise<UserAccount | null> => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const res = await fetch('/api/accounts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'login',
+            ...params,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.account) {
+          throw new Error(data?.error || 'Could not sign in.');
+        }
+        setAccount(data.account);
+        return data.account as UserAccount;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Sign-in failed');
+        return null;
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    []
+  );
+
+  const logoutAccount = useCallback(() => {
+    setAccount(null);
+  }, []);
+
+  const addFriendByEmail = useCallback(
+    async (friendEmail: string): Promise<boolean> => {
+      const currentAcc = accountRef.current;
+      if (!currentAcc) {
+        setError('Sign in with your Google account to add friends.');
+        return false;
+      }
+      setError(null);
+      try {
+        const res = await fetch('/api/accounts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'addFriend',
+            email: currentAcc.email,
+            name: currentAcc.name,
+            avatar: currentAcc.avatar,
+            account: currentAcc,
+            friendEmail,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.account) {
+          throw new Error(data?.error || 'Failed to add friend.');
+        }
+        setAccount(data.account);
+        return true;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to add friend');
+        return false;
+      }
+    },
+    []
+  );
+
+  const removeFriendByEmail = useCallback(async (friendEmail: string) => {
+    const currentAcc = accountRef.current;
+    if (!currentAcc) return;
+    try {
+      const res = await fetch('/api/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'removeFriend',
+          email: currentAcc.email,
+          friendEmail,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.account) {
+        setAccount(data.account);
+      }
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  const inviteFriendToRoom = useCallback(
+    async (friendEmail: string): Promise<boolean> => {
+      const currentAcc = accountRef.current;
+      const currentRoom = roomRef.current;
+      if (!currentAcc || !currentRoom) {
+        setError('Sign in and enter a room before inviting friends.');
+        return false;
+      }
+      try {
+        const res = await fetch('/api/accounts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'sendInvite',
+            fromEmail: currentAcc.email,
+            fromName: currentAcc.name,
+            fromAvatar: currentAcc.avatar,
+            toEmail: friendEmail,
+            roomCode: currentRoom.code,
+            roomTitle: currentRoom.title,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.invite) {
+          throw new Error(data?.error || 'Could not send invite.');
+        }
+
+        // Also broadcast live over MQTT user invite topic so friend gets instant popup
+        const client = userMqttClientRef.current || mqttClientRef.current;
+        if (client && client.connected) {
+          const inviteTopic = `examroom/v2/user/${encodeURIComponent(
+            friendEmail.trim().toLowerCase()
+          )}/invites`;
+          client.publish(inviteTopic, JSON.stringify(data.invite), {
+            qos: 1,
+            retain: false,
+          });
+        }
+        return true;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to send invite');
+        return false;
+      }
+    },
+    []
+  );
+
+  const dismissRoomInvite = useCallback(async (inviteId: string) => {
+    const currentAcc = accountRef.current;
+    if (!currentAcc) return;
+    setAccount((prev) =>
+      prev
+        ? { ...prev, invites: prev.invites.filter((i) => i.id !== inviteId) }
+        : prev
+    );
+    try {
+      const res = await fetch('/api/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'dismissInvite',
+          email: currentAcc.email,
+          inviteId,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.account) {
+        setAccount(data.account);
+      }
+    } catch {
+      // Ignore
+    }
+  }, []);
+
   const createRoom = useCallback(
     async (params: {
       name: string;
@@ -344,6 +633,8 @@ export function useRoom(): UseRoomReturn {
             memberId: activeMemberId,
             name: params.name,
             avatar: params.avatar,
+            email: accountRef.current?.email,
+            pictureUrl: accountRef.current?.pictureUrl,
             title: params.title,
             mode: params.mode || 'wait',
           }),
@@ -395,6 +686,8 @@ export function useRoom(): UseRoomReturn {
             memberId: activeMemberId,
             name: params.name,
             avatar: params.avatar,
+            email: accountRef.current?.email,
+            pictureUrl: accountRef.current?.pictureUrl,
           }),
         });
         const data = await res.json();
@@ -443,7 +736,9 @@ export function useRoom(): UseRoomReturn {
         members: remainingMembers,
         isRevealed:
           departingRoom.status === 'active'
-            ? departingRoom.forceRevealedQuestionIndex === qIdx || allRemainingAnswered
+            ? departingRoom.mode === 'wait'
+              ? allRemainingAnswered
+              : departingRoom.forceRevealedQuestionIndex === qIdx || allRemainingAnswered
             : departingRoom.isRevealed,
         version: departingRoom.version + 1,
         updatedAt: Date.now(),
@@ -511,6 +806,13 @@ export function useRoom(): UseRoomReturn {
       }
     },
     [memberId, applyAndBroadcastRoom]
+  );
+
+  const toggleReady = useCallback(
+    async (ready?: boolean) => {
+      await postRoomAction('toggleReady', typeof ready === 'boolean' ? { ready } : {});
+    },
+    [postRoomAction]
   );
 
   const updateSettings = useCallback(
@@ -651,6 +953,33 @@ export function useRoom(): UseRoomReturn {
     return room.hostId === me.id || me.isHost;
   }, [room, me]);
 
+  const allMembersReady = useMemo<boolean>(() => {
+    if (!room || room.members.length === 0) return false;
+    return room.members.every((m) => Boolean(m.isReady));
+  }, [room]);
+
+  const readyCount = useMemo<number>(() => {
+    if (!room) return 0;
+    return room.members.filter((m) => Boolean(m.isReady)).length;
+  }, [room]);
+
+  const myReadyForNext = useMemo<boolean>(() => {
+    if (!room || !me || room.status !== 'active') return false;
+    return (me.readyForNextQuestionIndex ?? -1) >= room.currentQuestionIndex;
+  }, [room, me]);
+
+  const nextReadyCount = useMemo<number>(() => {
+    if (!room || room.status !== 'active') return 0;
+    const qIdx = room.currentQuestionIndex;
+    return room.members.filter((m) => (m.readyForNextQuestionIndex ?? -1) >= qIdx).length;
+  }, [room]);
+
+  const waitingOnNextMembers = useMemo<Member[]>(() => {
+    if (!room || room.status !== 'active') return [];
+    const qIdx = room.currentQuestionIndex;
+    return room.members.filter((m) => (m.readyForNextQuestionIndex ?? -1) < qIdx);
+  }, [room]);
+
   const currentQuestion = useMemo<Question | null>(() => {
     if (!room || room.status === 'lobby') return null;
     return room.questions[room.currentQuestionIndex] || null;
@@ -661,27 +990,20 @@ export function useRoom(): UseRoomReturn {
     return me.answers[room.currentQuestionIndex] || null;
   }, [room, me]);
 
-  /**
-   * Strict Wait-Mode vs Race-Mode reveal check:
-   * In 'wait' mode, NEVER reveal the answer until either:
-   * - room.status === 'finished'
-   * - room.forceRevealedQuestionIndex === room.currentQuestionIndex (Host clicked Force Reveal)
-   * - Every member currently in room.members has locked in an answer for room.currentQuestionIndex
-   */
   const isAnswerRevealedToMe = useMemo<boolean>(() => {
     if (!room) return false;
     if (room.status === 'finished') return true;
     const qIdx = room.currentQuestionIndex;
-    const isForceRevealed = room.forceRevealedQuestionIndex === qIdx;
     const allMembersAnswered =
       room.members.length > 0 &&
       room.members.every((m) => m.answers[qIdx] !== undefined);
 
     if (room.mode === 'wait') {
-      return isForceRevealed || (room.isRevealed && allMembersAnswered);
+      // Strictly never reveal early in Wait mode
+      return allMembersAnswered;
     }
 
-    // In 'race' mode, reveal as soon as the local player answers OR when everyone has answered / forced reveal
+    const isForceRevealed = room.forceRevealedQuestionIndex === qIdx;
     return myCurrentAnswer !== null || isForceRevealed || allMembersAnswered;
   }, [room, myCurrentAnswer]);
 
@@ -708,7 +1030,6 @@ export function useRoom(): UseRoomReturn {
       if (!ans) return;
       const isMe = me ? m.id === me.id : false;
 
-      // In 'wait' mode before isAnswerRevealedToMe is true, only show the local user's own tag on their chosen option
       const canSeeTag =
         room.mode === 'race' || isAnswerRevealedToMe || isMe;
 
@@ -789,6 +1110,11 @@ export function useRoom(): UseRoomReturn {
     isLoading,
     error,
     clearError,
+    allMembersReady,
+    readyCount,
+    myReadyForNext,
+    nextReadyCount,
+    waitingOnNextMembers,
     currentQuestion,
     myCurrentAnswer,
     isAnswerRevealedToMe,
@@ -800,9 +1126,17 @@ export function useRoom(): UseRoomReturn {
     peersWhoGotItRightWithMe,
     leaderboard,
     activeReactions,
+    account,
+    loginWithGoogle,
+    logoutAccount,
+    addFriendByEmail,
+    removeFriendByEmail,
+    inviteFriendToRoom,
+    dismissRoomInvite,
     createRoom,
     joinRoom,
     leaveRoom,
+    toggleReady,
     updateSettings,
     setQuestions,
     parseAndSetMarkdown,

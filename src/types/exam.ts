@@ -16,6 +16,8 @@ export interface Question {
   options: string[];
   correctIndex: number;
   explanation: string;
+  /** NotebookLM-style per-option explanations (index matches options[i]) */
+  optionExplanations?: string[];
   category?: string;
   difficulty?: 'easy' | 'medium' | 'hard';
   timeLimitSeconds?: number;
@@ -42,7 +44,13 @@ export interface Member {
   id: string;
   name: string;
   avatar: string;
+  email?: string;
+  pictureUrl?: string;
   isHost: boolean;
+  /** Mutual Lobby Ready gate */
+  isReady?: boolean;
+  /** Mutual Next Question gate: questionIndex this member has pressed Next on (-1 if none) */
+  readyForNextQuestionIndex?: number;
   score: number;
   streak: number;
   bestStreak: number;
@@ -94,31 +102,15 @@ export interface RoomState {
   title: string;
   status: RoomStatus;
   mode: GameMode;
+  /** 0 = Timer OFF (Unlimited time). > 0 = seconds per question */
   timePerQuestion: number;
   hostId: string;
   currentQuestionIndex: number;
   questionStartedAt: number;
-  /**
-   * Monotonic session timestamp updated whenever startExam or resetRoom is triggered.
-   * Used by CRDT mergeRoomStates so old session answers don't carry into a new round.
-   */
   examSessionId?: number;
-  /**
-   * Question index explicitly force-revealed by the host (-1 if none).
-   */
   forceRevealedQuestionIndex?: number;
-  /**
-   * Timestamp when room.questions was last updated.
-   */
   questionsUpdatedAt?: number;
-  /**
-   * IDs of members removed from the room so CRDT merges don't re-add them.
-   */
   kickedMemberIds?: string[];
-  /**
-   * In 'wait' mode: becomes true ONLY when all members in the room have answered
-   * the current question or the host clicks Force Reveal.
-   */
   isRevealed: boolean;
   questions: Question[];
   members: Member[];
@@ -161,6 +153,33 @@ export interface SendReactionInput {
   questionIndex?: number;
 }
 
+export interface FriendEntry {
+  email: string;
+  name: string;
+  avatar: string;
+  addedAt: number;
+}
+
+export interface RoomInvite {
+  id: string;
+  fromEmail: string;
+  fromName: string;
+  fromAvatar: string;
+  roomCode: string;
+  roomTitle: string;
+  createdAt: number;
+}
+
+export interface UserAccount {
+  email: string;
+  name: string;
+  avatar: string;
+  pictureUrl?: string;
+  friends: FriendEntry[];
+  invites: RoomInvite[];
+  updatedAt: number;
+}
+
 export interface UseRoomReturn {
   /** Full synchronized room state, or null when on landing screen */
   room: RoomState | null;
@@ -175,44 +194,40 @@ export interface UseRoomReturn {
   /** Clear current error */
   clearError: () => void;
 
+  // Mutual Ready & Mutual Next Gate helpers
+  allMembersReady: boolean;
+  readyCount: number;
+  myReadyForNext: boolean;
+  nextReadyCount: number;
+  waitingOnNextMembers: Member[];
+
   // Derived current question helpers
-  /** Current active Question object (or null if in lobby/finished) */
   currentQuestion: Question | null;
-  /** Local member's answer for the current question, if submitted */
   myCurrentAnswer: MemberAnswer | null;
-  /**
-   * True when the current question's correct answer, explanation, and peer tags
-   * should be shown to the local user:
-   * - In 'wait' mode: true ONLY when all members have answered or host forced reveal
-   * - In 'race' mode: true as soon as the local member has answered OR room.isRevealed is true
-   */
   isAnswerRevealedToMe: boolean;
-  /**
-   * Map of optionIndex (0..N) -> MemberAnswerTag[] for the current question.
-   * Respects mode visibility rules (in 'wait' mode before reveal, only shows local user's own tag;
-   * after reveal or in 'race' mode, shows all members who picked each option).
-   */
   optionTags: Record<number, MemberAnswerTag[]>;
-  /** Number of members who have locked in an answer for the current question */
   answeredCount: number;
-  /** Total number of members in the room */
   totalMembersCount: number;
-  /** Members who have NOT answered the current question yet */
   waitingOnMembers: Member[];
-  /**
-   * Members who got the current question RIGHT while the local user got it WRONG.
-   * Useful for triggering the contextual "They got it right & you missed it!" reaction strip.
-   */
   peersWhoGotItRightWhenIMissed: Member[];
-  /**
-   * Members who ALSO got the current question RIGHT when the local user got it right.
-   * Useful for "Twin brain!" / cheering contextual reactions.
-   */
   peersWhoGotItRightWithMe: Member[];
-  /** Sorted leaderboard of members (by score desc, then totalTimeMs asc) */
   leaderboard: Member[];
-  /** Active floating reactions from the last ~6 seconds */
   activeReactions: EmojiReaction[];
+
+  // Account & Friends state & actions
+  account: UserAccount | null;
+  loginWithGoogle: (params: {
+    email: string;
+    name: string;
+    avatar: string;
+    pictureUrl?: string;
+    googleCredential?: string;
+  }) => Promise<UserAccount | null>;
+  logoutAccount: () => void;
+  addFriendByEmail: (friendEmail: string) => Promise<boolean>;
+  removeFriendByEmail: (friendEmail: string) => Promise<void>;
+  inviteFriendToRoom: (friendEmail: string) => Promise<boolean>;
+  dismissRoomInvite: (inviteId: string) => Promise<void>;
 
   // Room Lifecycle & Actions
   createRoom: (params: {
@@ -227,6 +242,7 @@ export interface UseRoomReturn {
     avatar: string;
   }) => Promise<RoomState | null>;
   leaveRoom: () => void;
+  toggleReady: (ready?: boolean) => Promise<void>;
   updateSettings: (settings: RoomSettingsUpdate) => Promise<void>;
   setQuestions: (questions: Question[], title?: string) => Promise<void>;
   parseAndSetMarkdown: (params: {

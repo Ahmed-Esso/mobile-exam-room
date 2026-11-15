@@ -11,6 +11,9 @@ export async function POST(req: NextRequest) {
     const memberId = String(body.memberId || `user-${Date.now()}`);
     const name = String(body.name || 'Player').trim();
     const avatar = String(body.avatar || '🐥');
+    const email = typeof body.email === 'string' ? body.email : undefined;
+    const pictureUrl =
+      typeof body.pictureUrl === 'string' ? body.pictureUrl : undefined;
 
     if (action === 'join') {
       const code = String(body.code || '').trim().toUpperCase();
@@ -20,7 +23,14 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
-      const room = joinRoomInStore({ code, memberId, name, avatar });
+      const room = joinRoomInStore({
+        code,
+        memberId,
+        name,
+        avatar,
+        email,
+        pictureUrl,
+      });
       if (!room) {
         return NextResponse.json(
           { error: `Room "${code}" was not found. Check the 6-character code!` },
@@ -37,6 +47,8 @@ export async function POST(req: NextRequest) {
       memberId,
       name,
       avatar,
+      email,
+      pictureUrl,
       title,
       mode,
     });

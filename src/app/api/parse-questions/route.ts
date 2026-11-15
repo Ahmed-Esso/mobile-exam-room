@@ -79,26 +79,27 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(deterministicResult satisfies ParseQuestionsResult);
     }
 
-    // Call Gemini 2.5 Flash multimodal REST API (supports PDFs, images, and text/Markdown)
     try {
       const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(
         apiKey
       )}`;
 
-      const promptText = `You are an expert exam question parser and academic assessment designer.
+      const promptText = `You are an expert exam question parser and academic assessment designer (NotebookLM study-guide style).
 Analyze the provided input (PDF documents, images of exam papers/slides, or Markdown/study notes):
 1. Extract all multiple-choice questions, options, correct answers, and explanations. If the input consists of raw study notes or slides without explicit questions, generate high-yield multiple-choice questions testing the core concepts.
 2. MATH & SCIENCE FORMATTING (CRITICAL): Format ALL mathematical equations, formulas, fractions, exponents, subscripts, integrals, vectors, Greek symbols, and physics/chemistry notation using clean LaTeX:
    - Use $...$ for inline math (e.g. $E_k = \\frac{1}{2}mv^2$, $O(n \\log n)$, $\\int_0^1 x^2 \\, dx$).
    - Use $$...$$ for standalone display equations.
-3. LANGUAGE PRESERVATION: Preserve the exact language of the source material (e.g., if the input is in Arabic, keep prompts, options, and explanations in Arabic while keeping LaTeX math expressions inside $...$; if English, keep in English).
+3. LANGUAGE PRESERVATION: Preserve the exact language of the source material (e.g., if the input is in Arabic, keep prompts, options, explanations, and optionExplanations in Arabic while keeping LaTeX math expressions inside $...$; if English, keep in English).
+4. NOTEBOOKLM PER-OPTION EXPLANATIONS: For every question, provide "optionExplanations": an array of strings with the EXACT SAME length as "options", where optionExplanations[i] explains in 1 crisp sentence why option i is correct or why option i is incorrect (with $...$ LaTeX where needed).
 
 Return ONLY a valid JSON array of question objects, where each object has:
 - "prompt": string (the question text, with LaTeX in $...$ or $$...$$)
 - "codeSnippet": string | optional (any programming code block belonging to the question, without backticks)
 - "options": string[] (array of 4 option strings, WITHOUT leading A)/B)/C)/D) prefixes, with any math in $...$)
 - "correctIndex": number (0-based index of the correct option, from 0 to options.length - 1)
-- "explanation": string (clear, high-yield explanation of why the correct answer is right and why other options are wrong, with any math in $...$)
+- "explanation": string (brief core takeaway summarizing why the correct answer is right, with any math in $...$)
+- "optionExplanations": string[] (1-sentence NotebookLM-style explanation for EACH option in "options", explaining why that specific choice is right or wrong)
 - "category": string | optional
 - "difficulty": "easy" | "medium" | "hard"
 ${markdown ? `\nAdditional Markdown / Text Input:\n${markdown}` : ''}`;
@@ -166,6 +167,17 @@ ${markdown ? `\nAdditional Markdown / Text Input:\n${markdown}` : ''}`;
               Number.isFinite(cIdx) && cIdx >= 0 && cIdx < opts.length
                 ? cIdx
                 : 0;
+            const optExps = Array.isArray(item.optionExplanations)
+              ? opts.map((_: string, oIdx: number) =>
+                  typeof item.optionExplanations[oIdx] === 'string' &&
+                  item.optionExplanations[oIdx].trim()
+                    ? item.optionExplanations[oIdx].trim()
+                    : oIdx === safeCorrect
+                    ? 'Correct choice.'
+                    : 'Incorrect choice.'
+                )
+              : undefined;
+
             return {
               id: `gem-q-${idx + 1}-${Math.random().toString(36).slice(2, 7)}`,
               prompt: item.prompt.trim(),
@@ -179,6 +191,7 @@ ${markdown ? `\nAdditional Markdown / Text Input:\n${markdown}` : ''}`;
                 typeof item.explanation === 'string' && item.explanation.trim()
                   ? item.explanation.trim()
                   : `Correct answer: ${opts[safeCorrect]}`,
+              optionExplanations: optExps,
               category:
                 typeof item.category === 'string' ? item.category : undefined,
               difficulty:

@@ -26,6 +26,10 @@ export const metadata: Metadata = {
   description:
     'Spin up a room, share a 6-letter code, and take an exam together from your phones, with live answer tags, emoji reactions and a podium at the end.',
   applicationName: 'Exam Room',
+  icons: {
+    icon: [{ url: '/icon.svg', type: 'image/svg+xml' }],
+    apple: [{ url: '/apple-icon', sizes: '180x180', type: 'image/png' }],
+  },
   appleWebApp: {
     capable: true,
     title: 'Exam Room',

@@ -7,10 +7,13 @@ import {
   Copy,
   FileText,
   FileUp,
+  Hand,
   Hourglass,
+  Infinity as InfinityIcon,
   Loader2,
   LogOut,
   Play,
+  Send,
   Share2,
   Sparkles,
   Timer,
@@ -22,7 +25,7 @@ import type { GameMode, UseRoomReturn } from '@/types/exam';
 import { Avatar, Markdown, copyText, haptic } from './ui';
 import MarkdownQuestionModal from './MarkdownQuestionModal';
 
-const TIMES = [15, 30, 45, 60, 90];
+const TIMES = [0, 15, 30, 45, 60, 90];
 
 const MODES: { id: GameMode; title: string; body: string; icon: typeof Users; color: string }[] = [
   {
@@ -42,11 +45,13 @@ const MODES: { id: GameMode; title: string; body: string; icon: typeof Users; co
 ];
 
 export default function RoomLobby({ api }: { api: UseRoomReturn }) {
-  const { room, me, isHost } = api;
+  const { room, me, isHost, account, allMembersReady, readyCount } = api;
   const [copied, setCopied] = useState<'code' | 'link' | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
   const [starting, setStarting] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const [invitedEmails, setInvitedEmails] = useState<Record<string, boolean>>({});
+  const [invitingEmail, setInvitingEmail] = useState<string | null>(null);
 
   const inviteUrl = useMemo(() => {
     if (!room || typeof window === 'undefined') return '';
@@ -78,16 +83,34 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
     if (await copyText(inviteUrl)) flashCopied('link');
   };
 
+  const handleToggleReady = async () => {
+    if (!hasQuestions) return;
+    haptic([10, 35, 10]);
+    await api.toggleReady(!me?.isReady);
+  };
+
   const start = async () => {
-    if (room.questions.length === 0) return;
+    if (!hasQuestions || !allMembersReady) return;
     setStarting(true);
     haptic([12, 40, 20]);
     await api.startExam();
     setStarting(false);
   };
 
+  const sendFriendInvite = async (friendEmail: string) => {
+    setInvitingEmail(friendEmail);
+    haptic(8);
+    const ok = await api.inviteFriendToRoom(friendEmail);
+    setInvitingEmail(null);
+    if (ok) {
+      setInvitedEmails((prev) => ({ ...prev, [friendEmail]: true }));
+    }
+  };
+
   const playerCount = room.members.length;
   const hasQuestions = room.questions.length > 0;
+  const amReady = Boolean(me?.isReady);
+  const notReadyNames = room.members.filter((m) => !m.isReady).map((m) => m.name);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -155,55 +178,120 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
             </div>
           </section>
 
-          {/* Members */}
+          {/* Members + Ready Badges */}
           <section className="panel rise mt-6 p-4" style={{ animationDelay: '60ms' }}>
             <div className="flex items-center justify-between">
               <h2 className="font-display text-lg font-bold">Who&apos;s in the room</h2>
-              <span className="text-xs text-[var(--muted)] tabular">
-                {playerCount} {playerCount === 1 ? 'player' : 'players'} connected
+              <span className="text-xs font-semibold text-[var(--muted)] tabular">
+                {hasQuestions
+                  ? `Ready: ${readyCount}/${playerCount}`
+                  : `${playerCount} ${playerCount === 1 ? 'player' : 'players'}`}
               </span>
             </div>
             <ul className="mt-4 grid grid-cols-4 gap-x-2 gap-y-4">
-              {room.members.map((m, i) => (
-                <li
-                  key={m.id}
-                  className="pop relative flex flex-col items-center gap-1.5"
-                  style={{ animationDelay: `${i * 40}ms` }}
-                >
-                  <Avatar
-                    emoji={m.avatar}
-                    size={52}
-                    host={m.id === room.hostId}
-                    badge={m.statusBadge}
-                    ring={m.id === me?.id ? 'me' : 'none'}
-                  />
-                  <span className="w-full truncate text-center text-xs font-semibold">
-                    {m.id === me?.id ? `${m.name} (You)` : m.name}
-                  </span>
-                  {isHost && m.id !== me?.id ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        haptic(6);
-                        void api.removeMember(m.id);
-                      }}
-                      className="press absolute -top-1 right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--surface-3)] text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]"
-                      aria-label={`Remove ${m.name}`}
-                    >
-                      <X size={11} strokeWidth={3} />
-                    </button>
-                  ) : null}
-                </li>
-              ))}
+              {room.members.map((m, i) => {
+                const mReady = Boolean(m.isReady);
+                return (
+                  <li
+                    key={m.id}
+                    className="pop relative flex flex-col items-center gap-1.5"
+                    style={{ animationDelay: `${i * 40}ms` }}
+                  >
+                    <Avatar
+                      emoji={m.avatar}
+                      size={52}
+                      host={m.id === room.hostId}
+                      badge={m.statusBadge}
+                      ring={
+                        hasQuestions
+                          ? mReady
+                            ? 'correct'
+                            : 'thinking'
+                          : m.id === me?.id
+                          ? 'me'
+                          : 'none'
+                      }
+                    />
+                    <span className="w-full truncate text-center text-xs font-semibold">
+                      {m.id === me?.id ? `${m.name} (You)` : m.name}
+                    </span>
+                    {hasQuestions ? (
+                      <span
+                        className="-mt-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold"
+                        style={{
+                          background: mReady
+                            ? 'rgba(215, 255, 63, 0.16)'
+                            : 'var(--surface-2)',
+                          color: mReady ? 'var(--lime)' : 'var(--muted)',
+                        }}
+                      >
+                        {mReady ? '✅ Ready' : '⏳ Not Ready'}
+                      </span>
+                    ) : null}
+                    {isHost && m.id !== me?.id ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          haptic(6);
+                          void api.removeMember(m.id);
+                        }}
+                        className="press absolute -top-1 right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--surface-3)] text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]"
+                        aria-label={`Remove ${m.name}`}
+                      >
+                        <X size={11} strokeWidth={3} />
+                      </button>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
-            {playerCount === 1 ? (
+
+            {/* Quick Invite Friends row (when signed in with Google and friends exist) */}
+            {account && account.friends.length > 0 ? (
+              <div className="mt-4 border-t border-[var(--line)] pt-3">
+                <p className="mb-2 text-xs font-semibold text-[var(--muted)]">Invite Friends</p>
+                <div className="no-scrollbar -mx-4 flex gap-2 overflow-x-auto px-4">
+                  {account.friends.map((f) => {
+                    const alreadyInRoom = room.members.some(
+                      (m) => m.email?.toLowerCase() === f.email.toLowerCase()
+                    );
+                    const invited = invitedEmails[f.email];
+                    const sending = invitingEmail === f.email;
+                    return (
+                      <button
+                        key={f.email}
+                        type="button"
+                        disabled={alreadyInRoom || sending}
+                        onClick={() => void sendFriendInvite(f.email)}
+                        className="chip shrink-0 text-xs"
+                        data-active={invited}
+                      >
+                        <span>{f.avatar || '🐥'}</span>
+                        <span className="max-w-[90px] truncate">{f.name}</span>
+                        {alreadyInRoom ? (
+                          <span className="text-[10px] text-[var(--lime)]">In room</span>
+                        ) : sending ? (
+                          <Loader2 size={12} className="animate-spin" />
+                        ) : invited ? (
+                          <Check size={13} />
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[var(--lime)]">
+                            <Send size={11} /> Invite
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : playerCount === 1 ? (
               <p className="mt-3 rounded-xl bg-[var(--ink-2)] px-3 py-2 text-center text-xs text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
                 Share code <span className="code-cell font-bold text-[var(--paper)]">{room.code}</span> with your friends so they appear here live!
               </p>
             ) : null}
           </section>
 
-          {/* Question Studio Card (Prominent when 0 questions loaded) */}
+          {/* Question Studio Card */}
           <section
             className="panel rise mt-4 p-4"
             style={{
@@ -222,18 +310,22 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                   {hasQuestions
                     ? `${room.questions.length} ${
                         room.questions.length === 1 ? 'question' : 'questions'
-                      } ready · ~${Math.max(
-                        1,
-                        Math.round((room.questions.length * room.timePerQuestion) / 60)
-                      )} min`
-                    : 'No questions loaded yet — paste Markdown or upload a PDF / image'}
+                      } ready · ${
+                        room.timePerQuestion > 0
+                          ? `~${Math.max(
+                              1,
+                              Math.round((room.questions.length * room.timePerQuestion) / 60)
+                            )} min`
+                          : 'Unlimited time'
+                      }`
+                    : 'No questions loaded yet — paste Markdown or upload a PDF / screenshot'}
                 </p>
               </div>
               <span
                 className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
                 style={{
                   background: hasQuestions ? 'var(--surface-2)' : 'rgba(215, 255, 63, 0.16)',
-                  color: hasQuestions ? 'var(--lime)' : 'var(--lime)',
+                  color: 'var(--lime)',
                 }}
               >
                 {hasQuestions ? <FileText size={18} /> : <FileUp size={18} />}
@@ -251,7 +343,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                   <Sparkles size={14} className="text-[var(--lime)]" /> Supports Markdown, PDFs, Exam Photos &amp; LaTeX Math
                 </p>
                 <p className="mt-1">
-                  Paste structured Markdown for instant parsing, or upload a PDF / screenshot with Gemini Smart Parse to extract questions and LaTeX equations (`$...$`).
+                  Paste Markdown directly (or copy our AI prompt), or enter your Gemini key to extract questions from PDFs &amp; screenshots.
                 </p>
               </div>
             )}
@@ -276,7 +368,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
             </button>
           </section>
 
-          {/* Mode selector */}
+          {/* Mode selector + Optional Timer */}
           <section className="rise mt-4" style={{ animationDelay: '150ms' }}>
             <div className="mb-2.5 flex items-baseline justify-between px-1">
               <h2 className="font-display text-lg font-bold">How we play</h2>
@@ -338,7 +430,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
 
             <div className="mt-3 flex items-center gap-2 overflow-x-auto px-1 no-scrollbar">
               <span className="flex shrink-0 items-center gap-1.5 pr-1 text-xs font-semibold text-[var(--muted)]">
-                <Timer size={14} /> Per question
+                <Timer size={14} /> Timer
               </span>
               {TIMES.map((t) => (
                 <button
@@ -352,7 +444,13 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                     void api.updateSettings({ timePerQuestion: t });
                   }}
                 >
-                  {t}s
+                  {t === 0 ? (
+                    <span className="inline-flex items-center gap-1">
+                      <InfinityIcon size={13} /> Off
+                    </span>
+                  ) : (
+                    `${t}s`
+                  )}
                 </button>
               ))}
             </div>
@@ -360,31 +458,59 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
         </div>
       </div>
 
-      {/* Sticky start */}
-      <div className="relative z-10 border-t border-[var(--line)] bg-[rgba(14,15,19,0.9)] px-5 py-3 backdrop-blur">
-        {isHost ? (
+      {/* Sticky Mutual Ready / Start Footer */}
+      <div className="pb-safe relative z-10 border-t border-[var(--line)] bg-[rgba(14,15,19,0.9)] px-5 pt-3 backdrop-blur">
+        {!hasQuestions ? (
           <button
             type="button"
             className="btn-primary h-14 w-full text-base"
-            disabled={starting || !hasQuestions}
-            onClick={start}
+            disabled
           >
-            {starting ? <Loader2 size={20} className="animate-spin" /> : <Play size={19} fill="currentColor" />}
-            {!hasQuestions
-              ? 'Add questions above to start'
-              : `Start ${room.mode === 'race' ? 'the race' : 'exam'} · ${room.questions.length} Qs`}
+            Add questions above to start
           </button>
         ) : (
-          <div className="flex h-14 items-center justify-center gap-2.5 rounded-2xl bg-[var(--surface)] text-sm font-medium text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
-            <Hourglass size={16} className="text-[var(--lime)]" />
-            {hasQuestions
-              ? `Ready (${room.questions.length} Qs) — Waiting for host to start`
-              : 'Waiting for questions & host to start'}
-            <span className="thinking-dots">
-              <span />
-              <span />
-              <span />
-            </span>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between px-1 text-xs font-semibold text-[var(--muted)]">
+              <span className="tabular">
+                Ready: {readyCount} / {playerCount} {playerCount === 1 ? 'player' : 'players'}
+              </span>
+              <span>
+                {allMembersReady
+                  ? 'Everyone is ready!'
+                  : `Waiting on ${notReadyNames.join(', ')}`}
+              </span>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => void handleToggleReady()}
+                className={`h-14 flex-1 text-base ${amReady ? 'btn-secondary' : 'btn-primary'}`}
+                style={
+                  amReady
+                    ? {
+                        boxShadow: '0 0 0 2px var(--lime), inset 0 -2px 0 rgba(0,0,0,0.35)',
+                        color: 'var(--lime)',
+                      }
+                    : undefined
+                }
+              >
+                {amReady ? <Check size={19} strokeWidth={2.8} /> : <Hand size={19} />}
+                {amReady ? 'Ready ✓ (tap to cancel)' : "I'm Ready!"}
+              </button>
+
+              {isHost && playerCount === 1 && allMembersReady ? (
+                <button
+                  type="button"
+                  onClick={start}
+                  disabled={starting}
+                  className="btn-primary h-14 shrink-0 px-5 text-base"
+                >
+                  {starting ? <Loader2 size={18} className="animate-spin" /> : <Play size={18} fill="currentColor" />}
+                  Start Solo
+                </button>
+              ) : null}
+            </div>
           </div>
         )}
       </div>

@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { Hand, X } from 'lucide-react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Hand, SmilePlus, X } from 'lucide-react';
 import { STATUS_BADGES, ZOOM_REACTIONS, type UseRoomReturn } from '@/types/exam';
 import { emitLocalReaction } from './EmojiReactionOverlay';
 import { haptic } from './ui';
@@ -19,7 +19,12 @@ const LABELS: Record<string, string> = {
   '🫡': 'Salute',
 };
 
-export default function ReactionDock({ api }: { api: UseRoomReturn }) {
+/**
+ * Zoom/Teams style reaction dock. Collapsed by default into a small "React" pill so it
+ * stays out of the way; `leading` lets a screen put its main action (e.g. Next) beside it.
+ */
+export default function ReactionDock({ api, leading }: { api: UseRoomReturn; leading?: ReactNode }) {
+  const [open, setOpen] = useState(false);
   const [tapped, setTapped] = useState<{ emoji: string; n: number } | null>(null);
   const [statusOpen, setStatusOpen] = useState(false);
   const lastSent = useRef(0);
@@ -52,8 +57,14 @@ export default function ReactionDock({ api }: { api: UseRoomReturn }) {
     void api.setStatusBadge(next);
   };
 
+  const toggle = () => {
+    haptic(6);
+    setOpen((v) => !v);
+    setStatusOpen(false);
+  };
+
   return (
-    <div className="pb-safe relative z-30 px-3 pt-2">
+    <div className="pb-safe relative z-30 border-t border-[var(--line)] bg-[rgba(14,15,19,0.9)] px-3 pt-2 backdrop-blur-md">
       {/* Status popover */}
       {statusOpen ? (
         <div
@@ -88,45 +99,79 @@ export default function ReactionDock({ api }: { api: UseRoomReturn }) {
         </div>
       ) : null}
 
-      <div className="glass flex items-center gap-1 rounded-[26px] p-1.5 shadow-[0_0_0_1px_var(--line),0_16px_40px_-16px_rgba(0,0,0,0.8)]">
-        <div
-          className="no-scrollbar flex min-w-0 flex-1 items-center overflow-x-auto"
-          style={{ maskImage: 'linear-gradient(90deg, #000 88%, transparent)', WebkitMaskImage: 'linear-gradient(90deg, #000 88%, transparent)' }}
-          role="toolbar"
-          aria-label="Send a reaction"
-        >
-          {ZOOM_REACTIONS.map((e) => (
-            <button
-              key={e}
-              type="button"
-              onClick={() => send(e)}
-              aria-label={`React ${LABELS[e] ?? e}`}
-              className="press flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-[24px] hover:bg-white/5 active:bg-white/10"
-            >
-              <span key={tapped?.emoji === e ? tapped.n : 0} className={tapped?.emoji === e ? 'emoji-tap inline-block' : 'inline-block'}>
-                {e}
-              </span>
-            </button>
-          ))}
+      {/* Expanded emoji strip */}
+      {open ? (
+        <div className="rise mb-2 flex items-center gap-1 rounded-[22px] bg-[var(--surface)] p-1 shadow-[0_0_0_1px_var(--line)]">
+          <div
+            className="no-scrollbar flex min-w-0 flex-1 items-center overflow-x-auto"
+            style={{
+              maskImage: 'linear-gradient(90deg, #000 90%, transparent)',
+              WebkitMaskImage: 'linear-gradient(90deg, #000 90%, transparent)',
+            }}
+            role="toolbar"
+            aria-label="Send a reaction"
+          >
+            {ZOOM_REACTIONS.map((e) => (
+              <button
+                key={e}
+                type="button"
+                onClick={() => send(e)}
+                aria-label={`React ${LABELS[e] ?? e}`}
+                className="press flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-[24px] hover:bg-white/5 active:bg-white/10"
+              >
+                <span
+                  key={tapped?.emoji === e ? tapped.n : 0}
+                  className={tapped?.emoji === e ? 'emoji-tap inline-block' : 'inline-block'}
+                >
+                  {e}
+                </span>
+              </button>
+            ))}
+          </div>
+          <span className="h-7 w-px shrink-0 bg-[var(--line-strong)]" aria-hidden />
+          <button
+            type="button"
+            onClick={() => {
+              haptic(6);
+              setStatusOpen((v) => !v);
+            }}
+            aria-haspopup="menu"
+            aria-expanded={statusOpen}
+            aria-label={badge ? `Status ${badge}. Change status` : 'Raise hand or set a status'}
+            className="press flex h-11 w-11 shrink-0 items-center justify-center rounded-full"
+            style={{
+              background: badge ? 'var(--paper)' : 'var(--surface-3)',
+              color: badge ? 'var(--ink)' : 'var(--paper)',
+            }}
+          >
+            {badge ? <span className="pop text-lg leading-none">{badge}</span> : <Hand size={18} />}
+          </button>
         </div>
-        <span className="h-7 w-px shrink-0 bg-[var(--line-strong)]" aria-hidden />
+      ) : null}
+
+      {/* Bottom row: screen action + React pill */}
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">{leading}</div>
         <button
           type="button"
-          onClick={() => {
-            haptic(6);
-            setStatusOpen((v) => !v);
-          }}
-          aria-haspopup="menu"
-          aria-expanded={statusOpen}
-          aria-label={badge ? `Status ${badge}. Change status` : 'Raise hand or set a status'}
-          className="press relative flex h-11 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-semibold"
+          onClick={toggle}
+          aria-expanded={open}
+          aria-label={open ? 'Hide reactions' : 'Show reactions'}
+          className="press flex h-12 shrink-0 items-center gap-1.5 rounded-full px-4 text-sm font-semibold"
           style={{
-            background: badge ? 'var(--paper)' : 'var(--surface-3)',
-            color: badge ? 'var(--ink)' : 'var(--paper)',
+            background: open ? 'var(--paper)' : 'var(--surface-2)',
+            color: open ? 'var(--ink)' : 'var(--paper)',
+            boxShadow: open ? 'none' : 'inset 0 1px 0 rgba(255,255,255,0.06), 0 0 0 1px var(--line)',
           }}
         >
-          {badge ? <span className="pop text-lg leading-none">{badge}</span> : <Hand size={18} />}
-          <span className="sr-only">Status</span>
+          {open ? (
+            <X size={17} strokeWidth={2.5} />
+          ) : (
+            <>
+              {badge ? <span className="text-base leading-none">{badge}</span> : <SmilePlus size={17} />}
+              React
+            </>
+          )}
         </button>
       </div>
     </div>

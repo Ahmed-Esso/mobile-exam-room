@@ -62,7 +62,6 @@ function getStore(): GlobalRoomStore {
     }
     globalForRooms.__examRoomStoreV2 = { rooms };
   } else if (typeof window === 'undefined') {
-    // Merge any updates written to /tmp by sibling invocations on this container
     const disk = loadDiskRooms();
     for (const [code, diskRoom] of Object.entries(disk)) {
       const existing = globalForRooms.__examRoomStoreV2.rooms.get(code);
@@ -128,8 +127,10 @@ const STATUS_RANK: Record<RoomStatus, number> = {
 
 /**
  * Deterministic CRDT-style room state merger.
- * Works identically on both server and client so multi-phone rooms across
- * Vercel serverless instances and MQTT WebSockets never drop members or reveal early in Wait Mode.
+ * Handles:
+ * - Mutual Lobby Ready state (`isReady`)
+ * - Mutual Next Question gate (`readyForNextQuestionIndex`) with automatic advance when all members press Next
+ * - Strict Wait-mode hold (never reveals until all members have answered)
  */
 export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
   if (!a) return b;
@@ -141,7 +142,6 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
   const latestSessionId = Math.max(sessionA, sessionB);
   const sameSession = sessionA === sessionB;
 
-  // Primary state for room-level settings is the one with newer session or higher version/updatedAt
   const primary =
     sessionB > sessionA
       ? b
@@ -152,13 +152,11 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
       ? b
       : a;
 
-  // Kicked member IDs union
   const kickedSet = new Set<string>([
     ...(a.kickedMemberIds || []),
     ...(b.kickedMemberIds || []),
   ]);
 
-  // Questions: prefer newer questionsUpdatedAt, or non-empty questions array
   const qTimeA = a.questionsUpdatedAt || (a.questions.length > 0 ? a.updatedAt : 0);
   const qTimeB = b.questionsUpdatedAt || (b.questions.length > 0 ? b.updatedAt : 0);
   const useQuestionsB =
@@ -167,17 +165,18 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
   const mergedQuestions = useQuestionsB ? b.questions : a.questions;
   const mergedQuestionsUpdatedAt = Math.max(qTimeA, qTimeB);
 
-  // Determine authoritative hostId (prefer a member explicitly marked isHost: true)
   const hostFromA = a.members.find((m) => m.isHost)?.id;
   const hostFromB = b.members.find((m) => m.isHost)?.id;
   const mergedHostId = hostFromA || hostFromB || a.hostId || b.hostId;
 
-  // Union of members by member.id (never drop a joined friend unless explicitly kicked)
   const memberMap = new Map<string, Member>();
   for (const m of a.members) {
     if (!kickedSet.has(m.id)) {
       memberMap.set(m.id, {
         ...m,
+        isReady: sessionA === latestSessionId ? Boolean(m.isReady) : false,
+        readyForNextQuestionIndex:
+          sessionA === latestSessionId ? (m.readyForNextQuestionIndex ?? -1) : -1,
         answers: sessionA === latestSessionId ? { ...m.answers } : {},
       });
     }
@@ -187,10 +186,15 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
     if (kickedSet.has(mB.id)) continue;
     const mA = memberMap.get(mB.id);
     const bAnswers = sessionB === latestSessionId ? { ...mB.answers } : {};
+    const bReady = sessionB === latestSessionId ? Boolean(mB.isReady) : false;
+    const bNextIdx =
+      sessionB === latestSessionId ? (mB.readyForNextQuestionIndex ?? -1) : -1;
 
     if (!mA) {
       memberMap.set(mB.id, {
         ...mB,
+        isReady: bReady,
+        readyForNextQuestionIndex: bNextIdx,
         answers: bAnswers,
       });
     } else {
@@ -207,12 +211,29 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
       }
 
       const newerMeta = mB.lastSeenAt >= mA.lastSeenAt ? mB : mA;
+      const mergedReady =
+        sameSession
+          ? Boolean(newerMeta.isReady)
+          : sessionB > sessionA
+          ? bReady
+          : Boolean(mA.isReady);
+
+      const mergedNextIdx = sameSession
+        ? Math.max(mA.readyForNextQuestionIndex ?? -1, bNextIdx)
+        : sessionB > sessionA
+        ? bNextIdx
+        : (mA.readyForNextQuestionIndex ?? -1);
+
       memberMap.set(mB.id, {
         ...newerMeta,
         id: mB.id,
         name: newerMeta.name || mA.name || mB.name,
         avatar: newerMeta.avatar || mA.avatar || mB.avatar,
+        email: newerMeta.email || mA.email || mB.email,
+        pictureUrl: newerMeta.pictureUrl || mA.pictureUrl || mB.pictureUrl,
         isHost: mA.isHost || mB.isHost || mB.id === mergedHostId,
+        isReady: mergedReady,
+        readyForNextQuestionIndex: mergedNextIdx,
         statusBadge: newerMeta.statusBadge,
         joinedAt: Math.min(mA.joinedAt || Date.now(), mB.joinedAt || Date.now()),
         lastSeenAt: Math.max(mA.lastSeenAt || 0, mB.lastSeenAt || 0),
@@ -221,7 +242,6 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
     }
   }
 
-  // Sort members: host first, then by joinedAt
   const mergedMembers = Array.from(memberMap.values())
     .map((m) => ({
       ...recomputeMemberStats(m, mergedQuestions),
@@ -232,7 +252,6 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
       return x.joinedAt - y.joinedAt;
     });
 
-  // Status & currentQuestionIndex resolution
   let mergedStatus: RoomStatus = primary.status;
   let mergedQuestionIndex = primary.currentQuestionIndex;
   let mergedQuestionStartedAt = primary.questionStartedAt;
@@ -262,7 +281,28 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
     );
   }
 
-  // Merge reactions by id
+  // Mutual Next Question Gate check inside CRDT merge:
+  // If active and EVERY member in mergedMembers has readyForNextQuestionIndex >= mergedQuestionIndex, advance!
+  if (
+    mergedStatus === 'active' &&
+    mergedMembers.length > 0 &&
+    mergedMembers.every(
+      (m) => (m.readyForNextQuestionIndex ?? -1) >= mergedQuestionIndex
+    )
+  ) {
+    if (mergedQuestionIndex + 1 < mergedQuestions.length) {
+      mergedQuestionIndex += 1;
+      mergedQuestionStartedAt = Math.max(
+        mergedQuestionStartedAt,
+        a.updatedAt || 0,
+        b.updatedAt || 0
+      );
+      mergedForceRevealed = -1;
+    } else {
+      mergedStatus = 'finished';
+    }
+  }
+
   const reactionMap = new Map<string, EmojiReaction>();
   for (const rx of [...(a.reactions || []), ...(b.reactions || [])]) {
     if (rx && rx.id) {
@@ -273,18 +313,21 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
     .sort((x, y) => x.createdAt - y.createdAt)
     .slice(-40);
 
-  // Strict Wait-Mode & Race-Mode Reveal Calculation
   const allAnswered =
     mergedMembers.length > 0 &&
     mergedMembers.every((m) => m.answers[mergedQuestionIndex] !== undefined);
-  const isForceRevealed = mergedForceRevealed === mergedQuestionIndex;
 
   let mergedIsRevealed = false;
   if (mergedStatus === 'finished') {
     mergedIsRevealed = true;
   } else if (mergedStatus === 'active') {
-    // Strictly require either explicit host Force Reveal on this question OR every member in the room having answered
-    mergedIsRevealed = isForceRevealed || allAnswered;
+    if (primary.mode === 'wait') {
+      // Strictly never force-reveal in Wait mode: reveal ONLY when every member has answered
+      mergedIsRevealed = allAnswered;
+    } else {
+      mergedIsRevealed =
+        mergedForceRevealed === mergedQuestionIndex || allAnswered;
+    }
   }
 
   return {
@@ -297,7 +340,7 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
         : a.title || 'Live Exam Room',
     status: mergedStatus,
     mode: primary.mode,
-    timePerQuestion: primary.timePerQuestion || 30,
+    timePerQuestion: primary.timePerQuestion ?? 0,
     hostId: mergedHostId || (mergedMembers[0]?.id ?? ''),
     currentQuestionIndex: mergedQuestionIndex,
     questionStartedAt: mergedQuestionStartedAt,
@@ -358,8 +401,11 @@ function computePoints(
   }
 
   const basePoints = 1000;
+  const hasTimer = Boolean(room.timePerQuestion && room.timePerQuestion > 0);
   const maxTimeMs = (room.timePerQuestion || 30) * 1000;
-  const timeRatio = Math.max(0, Math.min(1, 1 - timeMs / maxTimeMs));
+  const timeRatio = hasTimer
+    ? Math.max(0, Math.min(1, 1 - timeMs / maxTimeMs))
+    : 0;
 
   const priorCorrectCount = room.members.filter((m) => {
     if (m.id === member.id) return false;
@@ -377,10 +423,10 @@ function computePoints(
         : priorCorrectCount === 2
         ? 150
         : 50;
-    const timeBonus = Math.round(timeRatio * 300);
+    const timeBonus = hasTimer ? Math.round(timeRatio * 300) : 0;
     speedBonus = rankBonus + timeBonus;
   } else {
-    const timeBonus = Math.round(timeRatio * 250);
+    const timeBonus = hasTimer ? Math.round(timeRatio * 250) : 0;
     const streakBonus = Math.min(400, member.streak * 100);
     speedBonus = timeBonus + streakBonus;
   }
@@ -444,7 +490,9 @@ function recordMemberAnswerInternal(
     room.members.every((m) => m.answers[qIdx] !== undefined);
 
   room.isRevealed =
-    room.forceRevealedQuestionIndex === qIdx || allAnswered;
+    room.mode === 'wait'
+      ? allAnswered
+      : room.forceRevealedQuestionIndex === qIdx || allAnswered;
   room.version += 1;
   room.updatedAt = Date.now();
   return true;
@@ -490,6 +538,8 @@ export function createRoomInStore(params: {
   memberId: string;
   name: string;
   avatar: string;
+  email?: string;
+  pictureUrl?: string;
   title?: string;
   mode?: GameMode;
 }): RoomState {
@@ -502,7 +552,11 @@ export function createRoomInStore(params: {
     id: params.memberId,
     name: params.name.trim() || 'Player 1',
     avatar: params.avatar || '🐥',
+    email: params.email?.trim().toLowerCase(),
+    pictureUrl: params.pictureUrl,
     isHost: true,
+    isReady: false,
+    readyForNextQuestionIndex: -1,
     score: 0,
     streak: 0,
     bestStreak: 0,
@@ -519,7 +573,7 @@ export function createRoomInStore(params: {
     title: params.title?.trim() || 'Live Exam Room',
     status: 'lobby',
     mode: params.mode || 'wait',
-    timePerQuestion: 30,
+    timePerQuestion: 0, // Timer OFF by default
     hostId: hostMember.id,
     currentQuestionIndex: 0,
     questionStartedAt: now,
@@ -552,6 +606,8 @@ export function joinRoomInStore(params: {
   memberId: string;
   name: string;
   avatar: string;
+  email?: string;
+  pictureUrl?: string;
 }): RoomState | null {
   const store = getStore();
   const cleanCode = params.code.trim().toUpperCase();
@@ -561,13 +617,15 @@ export function joinRoomInStore(params: {
   let room = store.rooms.get(cleanCode);
 
   if (!room) {
-    // If joining on a different serverless lambda instance before state syncs,
-    // create a joinable room stub so the joining peer immediately connects via MQTT & syncs with the host
     const joiningMember: Member = {
       id: params.memberId,
       name: params.name.trim() || 'Player',
       avatar: params.avatar || '🐥',
+      email: params.email?.trim().toLowerCase(),
+      pictureUrl: params.pictureUrl,
       isHost: false,
+      isReady: false,
+      readyForNextQuestionIndex: -1,
       score: 0,
       streak: 0,
       bestStreak: 0,
@@ -583,7 +641,7 @@ export function joinRoomInStore(params: {
       title: 'Live Exam Room',
       status: 'lobby',
       mode: 'wait',
-      timePerQuestion: 30,
+      timePerQuestion: 0,
       hostId: '',
       currentQuestionIndex: 0,
       questionStartedAt: now,
@@ -604,7 +662,6 @@ export function joinRoomInStore(params: {
     return room;
   }
 
-  // Ensure member is removed from kickedMemberIds if rejoining
   if (room.kickedMemberIds?.includes(params.memberId)) {
     room.kickedMemberIds = room.kickedMemberIds.filter(
       (id) => id !== params.memberId
@@ -615,13 +672,19 @@ export function joinRoomInStore(params: {
   if (existing) {
     existing.name = params.name.trim() || existing.name;
     existing.avatar = params.avatar || existing.avatar;
+    if (params.email) existing.email = params.email.trim().toLowerCase();
+    if (params.pictureUrl) existing.pictureUrl = params.pictureUrl;
     existing.lastSeenAt = now;
   } else {
     const newMember: Member = {
       id: params.memberId,
       name: params.name.trim() || `Player ${room.members.length + 1}`,
       avatar: params.avatar || '🐥',
+      email: params.email?.trim().toLowerCase(),
+      pictureUrl: params.pictureUrl,
       isHost: false,
+      isReady: false,
+      readyForNextQuestionIndex: -1,
       score: 0,
       streak: 0,
       bestStreak: 0,
@@ -635,14 +698,15 @@ export function joinRoomInStore(params: {
     room.members.push(newMember);
   }
 
-  // Re-evaluate reveal state when a new member joins an active Wait-mode question
   if (room.status === 'active') {
     const qIdx = room.currentQuestionIndex;
     const allAnswered =
       room.members.length > 0 &&
       room.members.every((m) => m.answers[qIdx] !== undefined);
     room.isRevealed =
-      room.forceRevealedQuestionIndex === qIdx || allAnswered;
+      room.mode === 'wait'
+        ? allAnswered
+        : room.forceRevealedQuestionIndex === qIdx || allAnswered;
   }
 
   room.version += 1;
@@ -650,6 +714,29 @@ export function joinRoomInStore(params: {
   store.rooms.set(cleanCode, room);
   saveDiskRooms(store.rooms);
   return room;
+}
+
+function activateExam(room: RoomState, now: number, modeOverride?: GameMode) {
+  if (modeOverride === 'wait' || modeOverride === 'race') {
+    room.mode = modeOverride;
+  }
+  room.status = 'active';
+  room.currentQuestionIndex = 0;
+  room.questionStartedAt = now;
+  room.examSessionId = now;
+  room.forceRevealedQuestionIndex = -1;
+  room.isRevealed = false;
+  room.reactions = [];
+  for (const m of room.members) {
+    m.isReady = false;
+    m.readyForNextQuestionIndex = -1;
+    m.score = 0;
+    m.streak = 0;
+    m.bestStreak = 0;
+    m.correctCount = 0;
+    m.totalTimeMs = 0;
+    m.answers = {};
+  }
 }
 
 export function mutateRoomInStore(
@@ -684,6 +771,30 @@ export function mutateRoomInStore(
   }
 
   switch (action) {
+    case 'toggleReady': {
+      if (actingMember && room.status === 'lobby') {
+        const explicitReady =
+          typeof payload.ready === 'boolean'
+            ? payload.ready
+            : !Boolean(actingMember.isReady);
+        actingMember.isReady = explicitReady;
+        actingMember.lastSeenAt = now;
+
+        // If 2+ members are in the room, questions are loaded, and ALL members are now Ready, auto-start!
+        const allReady =
+          room.members.length >= 2 &&
+          room.questions.length > 0 &&
+          room.members.every((m) => Boolean(m.isReady));
+        if (allReady) {
+          activateExam(room, now);
+        }
+
+        room.version += 1;
+        room.updatedAt = now;
+      }
+      break;
+    }
+
     case 'updateSettings': {
       const settings = (payload.settings || payload) as RoomSettingsUpdate;
       if (typeof settings.title === 'string' && settings.title.trim()) {
@@ -693,7 +804,10 @@ export function mutateRoomInStore(
         room.mode = settings.mode;
       }
       if (typeof settings.timePerQuestion === 'number') {
-        room.timePerQuestion = Math.max(5, Math.min(180, settings.timePerQuestion));
+        room.timePerQuestion =
+          settings.timePerQuestion <= 0
+            ? 0
+            : Math.max(5, Math.min(180, settings.timePerQuestion));
       }
       room.version += 1;
       room.updatedAt = now;
@@ -721,24 +835,18 @@ export function mutateRoomInStore(
       if (room.questions.length === 0) {
         break;
       }
-      if (payload.mode === 'wait' || payload.mode === 'race') {
-        room.mode = payload.mode;
+      const allReady =
+        room.members.length > 0 &&
+        room.members.every((m) => Boolean(m.isReady));
+      if (!allReady) {
+        // Mutual Ready gate: do not start until every member is Ready
+        break;
       }
-      room.status = 'active';
-      room.currentQuestionIndex = 0;
-      room.questionStartedAt = now;
-      room.examSessionId = now;
-      room.forceRevealedQuestionIndex = -1;
-      room.isRevealed = false;
-      room.reactions = [];
-      for (const m of room.members) {
-        m.score = 0;
-        m.streak = 0;
-        m.bestStreak = 0;
-        m.correctCount = 0;
-        m.totalTimeMs = 0;
-        m.answers = {};
-      }
+      const modeOverride =
+        payload.mode === 'wait' || payload.mode === 'race'
+          ? (payload.mode as GameMode)
+          : undefined;
+      activateExam(room, now, modeOverride);
       room.version += 1;
       room.updatedAt = now;
       break;
@@ -753,7 +861,8 @@ export function mutateRoomInStore(
     }
 
     case 'revealQuestion': {
-      if (room.status === 'active') {
+      // Force Reveal is disabled in Wait mode: Wait mode ONLY reveals when every member has answered
+      if (room.status === 'active' && room.mode !== 'wait') {
         room.forceRevealedQuestionIndex = room.currentQuestionIndex;
         room.isRevealed = true;
         room.version += 1;
@@ -764,14 +873,25 @@ export function mutateRoomInStore(
 
     case 'nextQuestion': {
       if (room.status === 'active') {
-        if (room.currentQuestionIndex + 1 < room.questions.length) {
-          room.currentQuestionIndex += 1;
-          room.questionStartedAt = now;
-          room.forceRevealedQuestionIndex = -1;
-          room.isRevealed = false;
-        } else {
-          room.status = 'finished';
-          room.isRevealed = true;
+        if (actingMember) {
+          actingMember.readyForNextQuestionIndex = room.currentQuestionIndex;
+          actingMember.lastSeenAt = now;
+        }
+        const qIdx = room.currentQuestionIndex;
+        const allReadyForNext =
+          room.members.length > 0 &&
+          room.members.every((m) => (m.readyForNextQuestionIndex ?? -1) >= qIdx);
+
+        if (allReadyForNext) {
+          if (room.currentQuestionIndex + 1 < room.questions.length) {
+            room.currentQuestionIndex += 1;
+            room.questionStartedAt = now;
+            room.forceRevealedQuestionIndex = -1;
+            room.isRevealed = false;
+          } else {
+            room.status = 'finished';
+            room.isRevealed = true;
+          }
         }
         room.version += 1;
         room.updatedAt = now;
@@ -789,6 +909,8 @@ export function mutateRoomInStore(
       room.isRevealed = false;
       room.reactions = [];
       for (const m of room.members) {
+        m.isReady = false;
+        m.readyForNextQuestionIndex = -1;
         m.score = 0;
         m.streak = 0;
         m.bestStreak = 0;
@@ -840,12 +962,27 @@ export function mutateRoomInStore(
         );
         room.members = room.members.filter((m) => m.id !== targetId);
         const qIdx = room.currentQuestionIndex;
-        if (
-          room.status === 'active' &&
-          !room.isRevealed &&
-          room.members.every((m) => m.answers[qIdx] !== undefined)
-        ) {
-          room.isRevealed = true;
+        if (room.status === 'active') {
+          if (
+            !room.isRevealed &&
+            room.members.every((m) => m.answers[qIdx] !== undefined)
+          ) {
+            room.isRevealed = true;
+          }
+          if (
+            room.members.length > 0 &&
+            room.members.every((m) => (m.readyForNextQuestionIndex ?? -1) >= qIdx)
+          ) {
+            if (room.currentQuestionIndex + 1 < room.questions.length) {
+              room.currentQuestionIndex += 1;
+              room.questionStartedAt = now;
+              room.forceRevealedQuestionIndex = -1;
+              room.isRevealed = false;
+            } else {
+              room.status = 'finished';
+              room.isRevealed = true;
+            }
+          }
         }
         room.version += 1;
         room.updatedAt = now;

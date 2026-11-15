@@ -450,6 +450,11 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
                               const isCorrect = optIdx === q.correctIndex;
                               const isMyPick = myAns?.optionIndex === optIdx;
                               const tags = buildOptionTagsForQuestion(qIdx, optIdx);
+                              const perOptionExpl = q.optionExplanations?.[optIdx];
+                              const showFallbackHere =
+                                (!q.optionExplanations || !q.optionExplanations.some((e) => e && e.trim())) &&
+                                isCorrect &&
+                                Boolean(q.explanation);
 
                               return (
                                 <div
@@ -496,6 +501,26 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
                                           ))}
                                         </div>
                                       ) : null}
+                                      {perOptionExpl || showFallbackHere ? (
+                                        <div
+                                          className="mt-2 rounded-xl px-2.5 py-2 text-xs leading-relaxed text-[var(--muted)]"
+                                          style={{
+                                            background: 'rgba(0,0,0,0.28)',
+                                            boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.35)',
+                                          }}
+                                        >
+                                          <span
+                                            className="mb-0.5 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider"
+                                            style={{
+                                              color: isCorrect ? 'var(--lime)' : 'var(--faint)',
+                                            }}
+                                          >
+                                            <Sparkles size={11} />
+                                            {isCorrect ? 'Why it’s right' : 'Why not'}
+                                          </span>
+                                          <Markdown source={perOptionExpl || q.explanation} />
+                                        </div>
+                                      ) : null}
                                     </div>
                                   </div>
                                 </div>
@@ -503,14 +528,16 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
                             })}
                           </div>
 
-                          <div className="rounded-2xl bg-[var(--ink-2)] p-3.5 shadow-[0_0_0_1px_var(--line)]">
-                            <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[var(--lime)]">
-                              <Sparkles size={13} /> Why {LETTERS[q.correctIndex]} is correct
-                            </p>
-                            <div className="mt-1.5 text-xs leading-relaxed text-[var(--muted)]">
-                              <Markdown source={q.explanation} />
+                          {q.optionExplanations?.some((e) => e && e.trim()) && q.explanation ? (
+                            <div className="rounded-2xl bg-[var(--ink-2)] p-3.5 shadow-[0_0_0_1px_var(--line)]">
+                              <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[var(--lime)]">
+                                <Sparkles size={13} /> Key Takeaway
+                              </p>
+                              <div className="mt-1.5 text-xs leading-relaxed text-[var(--muted)]">
+                                <Markdown source={q.explanation} />
+                              </div>
                             </div>
-                          </div>
+                          ) : null}
                         </div>
                       </div>
                     </div>

@@ -1,6 +1,29 @@
 import { ParseQuestionsResult, Question } from '@/types/exam';
 
-export const MARKDOWN_FORMAT_GUIDE = `# Sample Format (Supports Markdown & LaTeX Math)
+export const AI_PROMPT_FOR_MARKDOWN_QUESTIONS = `Generate multiple-choice exam questions from the provided topic/notes in clean Markdown format so I can paste them directly into my Live Exam Room app.
+
+Follow these strict formatting rules:
+1. Wrap ALL math equations, formulas, fractions, exponents, subscripts, Greek letters, and chemical/physics symbols in LaTeX ($...$ for inline, $$...$$ for display math).
+2. Preserve the language of my source material (if Arabic, write questions, options, and explanations in Arabic while keeping LaTeX inside $...$; if English, write in English).
+3. Include a brief core takeaway AND a 1-sentence explanation for EACH option A, B, C, D explaining why that option is right or wrong.
+
+Use this exact Markdown structure for every question, separated by ---:
+
+### 1. [Question text]
+- A) [Option A]
+- B) [Option B]
+- C) [Option C]
+- D) [Option D]
+**Answer:** [A/B/C/D]
+**Explanation:** [Brief core takeaway]
+- **Explain A:** [Why A is correct or incorrect in 1 short sentence]
+- **Explain B:** [Why B is correct or incorrect in 1 short sentence]
+- **Explain C:** [Why C is correct or incorrect in 1 short sentence]
+- **Explain D:** [Why D is correct or incorrect in 1 short sentence]
+
+---`;
+
+export const MARKDOWN_FORMAT_GUIDE = `# Sample Format (Markdown + LaTeX + Per-Option Explanations)
 
 ### 1. What is the kinetic energy of a particle with mass $m$ and velocity $v$?
 - A) $E_k = mv$
@@ -8,16 +31,20 @@ export const MARKDOWN_FORMAT_GUIDE = `# Sample Format (Supports Markdown & LaTeX
 - C) $E_k = mc^2$
 - D) $E_k = mgh$
 **Answer:** B
-**Explanation:** Classical kinetic energy is given by $$E_k = \\frac{1}{2}mv^2$$ derived from integrating work $W = \\int F \\, dx = \\int m v \\, dv$.
+**Explanation:** Classical kinetic energy equals $\\frac{1}{2}mv^2$, derived from integrating work $W = \\int m v \\, dv$.
+- **Explain A:** $mv$ is linear momentum $p$, not kinetic energy.
+- **Explain B:** Correct! Integrating force over displacement yields $\\frac{1}{2}mv^2$.
+- **Explain C:** $mc^2$ is relativistic rest-mass energy, not classical kinetic energy.
+- **Explain D:** $mgh$ is gravitational potential energy near Earth's surface.
 
 ---
 
-### 2. Which HTTP status code indicates that the client is being rate-limited?
+### 2. Which HTTP status code indicates rate-limiting?
 - [ ] 401 Unauthorized
 - [ ] 403 Forbidden
 - [x] 429 Too Many Requests
 - [ ] 503 Service Unavailable
-> **Explanation:** HTTP **429 Too Many Requests** indicates the user has sent too many requests in a given time window.`;
+> **Explanation:** **429 Too Many Requests** indicates the client sent too many requests in a given window.`;
 
 const ARABIC_LETTER_MAP: Record<string, number> = {
   أ: 0,
@@ -30,9 +57,20 @@ const ARABIC_LETTER_MAP: Record<string, number> = {
   و: 5,
 };
 
+function letterToIndex(letter: string): number {
+  const upper = letter.toUpperCase();
+  if (/^[A-F]$/.test(upper)) {
+    return upper.charCodeAt(0) - 65;
+  }
+  if (ARABIC_LETTER_MAP[letter] !== undefined) {
+    return ARABIC_LETTER_MAP[letter];
+  }
+  return -1;
+}
+
 /**
- * Deterministic, flexible Markdown Question Parser with full LaTeX ($...$, $$...$$, \(...\), \[...\])
- * and bilingual (English + Arabic) support.
+ * Deterministic, flexible Markdown Question Parser with full LaTeX ($...$, $$...$$, \(...\), \[...\]),
+ * NotebookLM-style per-option explanations (- **Explain A:** ...), and bilingual (English + Arabic) support.
  */
 export function parseMarkdownQuestions(markdown: string): ParseQuestionsResult {
   const warnings: string[] = [];
@@ -183,12 +221,14 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
   const codeLines: string[] = [];
   const options: string[] = [];
   const explanationLines: string[] = [];
+  const optionExplanationsMap = new Map<number, string>();
 
   let detectedCorrectIndex = -1;
   let explicitAnswerRaw: string | null = null;
   let inCodeFence = false;
   let inExplanation = false;
   let seenFirstOption = false;
+  let lastOptionIdx = -1;
   let category: string | undefined;
   let difficulty: 'easy' | 'medium' | 'hard' | undefined;
 
@@ -232,7 +272,32 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       continue;
     }
 
-    // Check explicit Answer line (English + Arabic labels, preserving LaTeX underscores/backslashes)
+    // Check per-option explanation lines:
+    // e.g. `- **Explain A:** ...`, `**Explanation B:** ...`, `- **شرح أ:** ...`
+    const perOptionMatch = trimmed.match(
+      /^(?:[-*+>]\s*)?(?:\*\*)?(?:Explain|Explanation|Why|Option|شرح|تفسير)\s+([A-Fa-fأابجده])(?:\*\*)?\s*[:\-](?:\*\*)?\s*(.+)$/i
+    );
+    if (perOptionMatch) {
+      const optIdx = letterToIndex(perOptionMatch[1]);
+      if (optIdx >= 0) {
+        optionExplanationsMap.set(optIdx, perOptionMatch[2].trim());
+        inExplanation = false;
+        continue;
+      }
+    }
+
+    // Check sub-bullet or inline `> Explain:` directly beneath an option before Answer/Explanation
+    if (seenFirstOption && !inExplanation && lastOptionIdx >= 0 && explicitAnswerRaw === null) {
+      const inlineOptExplain = trimmed.match(
+        /^(?:[-*+>]\s*)?(?:\*\*)?(?:Explain|Why|Rationale|شرح|تفسير)(?:\*\*)?\s*[:\-](?:\*\*)?\s*(.+)$/i
+      );
+      if (inlineOptExplain) {
+        optionExplanationsMap.set(lastOptionIdx, inlineOptExplain[1].trim());
+        continue;
+      }
+    }
+
+    // Check explicit Answer line (English + Arabic labels)
     const answerMatch = trimmed.match(
       /^(?:>\s*)?(?:\*\*)?(?:Correct\s+Answer|Answer|Correct|Ans|الإجابة\s+الصحيحة|الاجابة\s+الصحيحة|الإجابة|الاجابة|الجواب)(?:\*\*)?\s*[:\-](?:\*\*)?\s*(?:\*\*)?(.+?)(?:\*\*)?$/i
     );
@@ -269,6 +334,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       if (isChecked) {
         detectedCorrectIndex = options.length;
       }
+      lastOptionIdx = options.length;
       options.push(optText);
       continue;
     }
@@ -286,6 +352,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
           .replace(/(?:\(correct\)|\[correct\]|\[x\]|\(صحيح\)|✅|✓|✔)\s*$/i, '')
           .trim();
       }
+      lastOptionIdx = options.length;
       options.push(optText);
       continue;
     }
@@ -359,6 +426,18 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       .trim() ||
     `The correct answer is **${String.fromCharCode(65 + detectedCorrectIndex)}) ${options[detectedCorrectIndex]}**.`;
 
+  let optionExplanations: string[] | undefined;
+  if (optionExplanationsMap.size > 0) {
+    optionExplanations = options.map((_, oIdx) => {
+      const explicit = optionExplanationsMap.get(oIdx);
+      if (explicit) return explicit;
+      if (oIdx === detectedCorrectIndex) {
+        return `Correct choice.`;
+      }
+      return `Incorrect choice.`;
+    });
+  }
+
   return {
     id: `q-${index + 1}-${Math.random().toString(36).slice(2, 7)}`,
     prompt,
@@ -366,6 +445,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
     options,
     correctIndex: detectedCorrectIndex,
     explanation,
+    optionExplanations,
     category,
     difficulty,
   };
@@ -389,6 +469,12 @@ export function formatQuestionsToMarkdown(questions: Question[]): string {
       lines.push(`**Answer:** ${correctLetter}`);
       if (q.explanation) {
         lines.push(`**Explanation:** ${q.explanation}`);
+      }
+      if (q.optionExplanations && q.optionExplanations.length > 0) {
+        q.optionExplanations.forEach((exp, oIdx) => {
+          const letter = String.fromCharCode(65 + oIdx);
+          lines.push(`- **Explain ${letter}:** ${exp}`);
+        });
       }
       return lines.join('\n');
     })
