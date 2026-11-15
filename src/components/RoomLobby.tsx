@@ -1,0 +1,425 @@
+'use client';
+
+import { useMemo, useState } from 'react';
+import {
+  Bot,
+  Check,
+  ChevronRight,
+  Copy,
+  FileText,
+  Hourglass,
+  Loader2,
+  LogOut,
+  Play,
+  Plus,
+  Share2,
+  Timer,
+  Users,
+  X,
+  Zap,
+} from 'lucide-react';
+import type { GameMode, Member, UseRoomReturn } from '@/types/exam';
+import { SAMPLE_EXAM_PACKS } from '@/lib/sample-exams';
+import { parseMarkdownQuestions } from '@/lib/markdown-parser';
+import { Avatar, Toggle, copyText, haptic } from './ui';
+import MarkdownQuestionModal from './MarkdownQuestionModal';
+
+const PERSONALITIES: { id: NonNullable<Member['botPersonality']>; label: string; hint: string }[] = [
+  { id: 'genius', label: 'Genius', hint: 'Rarely wrong' },
+  { id: 'speedster', label: 'Speedster', hint: 'Fast, sloppy' },
+  { id: 'careful', label: 'Careful', hint: 'Slow, steady' },
+  { id: 'wildcard', label: 'Wildcard', hint: 'Chaos' },
+];
+
+const TIMES = [15, 30, 45, 60, 90];
+
+const MODES: { id: GameMode; title: string; body: string; icon: typeof Users; color: string }[] = [
+  {
+    id: 'wait',
+    title: 'Wait for everyone',
+    body: 'Answers stay hidden until the whole room locks in. Then every pick reveals at once.',
+    icon: Users,
+    color: 'var(--peri)',
+  },
+  {
+    id: 'race',
+    title: 'Race',
+    body: 'Picks land live as people answer. First correct answers earn the biggest speed bonus.',
+    icon: Zap,
+    color: 'var(--amber)',
+  },
+];
+
+export default function RoomLobby({ api }: { api: UseRoomReturn }) {
+  const { room, me, isHost } = api;
+  const [copied, setCopied] = useState<'code' | 'link' | null>(null);
+  const [studioOpen, setStudioOpen] = useState(false);
+  const [botMenu, setBotMenu] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(false);
+
+  const inviteUrl = useMemo(() => {
+    if (!room || typeof window === 'undefined') return '';
+    return `${window.location.origin}${window.location.pathname}?room=${room.code}`;
+  }, [room]);
+
+  if (!room) return null;
+
+  const flashCopied = (kind: 'code' | 'link') => {
+    setCopied(kind);
+    haptic([8, 40, 8]);
+    window.setTimeout(() => setCopied(null), 1600);
+  };
+
+  const share = async () => {
+    const data = {
+      title: `Join my exam room ${room.code}`,
+      text: `Join "${room.title}" on Exam Room. Code: ${room.code}`,
+      url: inviteUrl,
+    };
+    if (typeof navigator !== 'undefined' && 'share' in navigator) {
+      try {
+        await navigator.share(data);
+        return;
+      } catch {
+        /* user cancelled or unsupported: fall back to copying */
+      }
+    }
+    if (await copyText(inviteUrl)) flashCopied('link');
+  };
+
+  const currentPackId = SAMPLE_EXAM_PACKS.find((p) => p.title === room.title)?.id;
+
+  const loadPack = async (packId: string) => {
+    if (!isHost) return;
+    const pack = SAMPLE_EXAM_PACKS.find((p) => p.id === packId);
+    if (!pack) return;
+    haptic(8);
+    const parsed = parseMarkdownQuestions(pack.markdown);
+    if (parsed.questions.length) await api.setQuestions(parsed.questions, pack.title);
+  };
+
+  const start = async () => {
+    setStarting(true);
+    haptic([12, 40, 20]);
+    await api.startExam();
+    setStarting(false);
+  };
+
+  const humans = room.members.filter((m) => !m.isBot).length;
+  const bots = room.members.length - humans;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="scroll-area">
+        <div className="pt-safe px-5 pb-6">
+          {/* Top bar */}
+          <header className="flex items-center justify-between gap-3 pt-1">
+            <button
+              type="button"
+              className="press flex h-10 items-center gap-2 rounded-full bg-[var(--surface-2)] px-3.5 text-sm font-medium text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]"
+              onClick={() => {
+                if (confirmLeave) api.leaveRoom();
+                else {
+                  setConfirmLeave(true);
+                  window.setTimeout(() => setConfirmLeave(false), 2500);
+                }
+              }}
+              style={confirmLeave ? { color: 'var(--coral)' } : undefined}
+            >
+              <LogOut size={16} />
+              {confirmLeave ? 'Tap again to leave' : 'Leave'}
+            </button>
+            <span className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-3 py-1.5 text-xs font-semibold text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
+              <span className="live-dot h-1.5 w-1.5 rounded-full bg-[var(--lime)]" />
+              Lobby · {room.members.length} in room
+            </span>
+          </header>
+
+          {/* Room code hero */}
+          <section className="rise mt-6 text-center">
+            <p className="text-sm font-medium text-[var(--muted)]">Room code</p>
+            <button
+              type="button"
+              onClick={async () => {
+                if (await copyText(room.code)) flashCopied('code');
+              }}
+              className="press mx-auto mt-2 flex items-center justify-center gap-1.5"
+              aria-label={`Copy room code ${room.code}`}
+            >
+              {room.code.split('').map((ch, i) => (
+                <span
+                  key={i}
+                  className="code-cell flex h-14 w-11 items-center justify-center rounded-[14px] bg-[var(--surface)] text-[28px] font-bold shadow-[inset_0_1px_0_rgba(255,255,255,0.06),inset_0_-3px_0_rgba(0,0,0,0.35),0_0_0_1px_var(--line)]"
+                >
+                  {ch}
+                </span>
+              ))}
+            </button>
+            <div className="mt-4 flex justify-center gap-2">
+              <button
+                type="button"
+                className="chip"
+                data-active={copied === 'code'}
+                onClick={async () => {
+                  if (await copyText(room.code)) flashCopied('code');
+                }}
+              >
+                {copied === 'code' ? <Check size={15} /> : <Copy size={15} />}
+                {copied === 'code' ? 'Code copied' : 'Copy code'}
+              </button>
+              <button type="button" className="chip" data-active={copied === 'link'} onClick={share}>
+                {copied === 'link' ? <Check size={15} /> : <Share2 size={15} />}
+                {copied === 'link' ? 'Link copied' : 'Share invite link'}
+              </button>
+            </div>
+          </section>
+
+          {/* Members */}
+          <section className="panel rise mt-6 p-4" style={{ animationDelay: '60ms' }}>
+            <div className="flex items-center justify-between">
+              <h2 className="font-display text-lg font-bold">Who&apos;s here</h2>
+              <span className="text-xs text-[var(--muted)] tabular">
+                {humans} {humans === 1 ? 'person' : 'people'}
+                {bots ? ` · ${bots} ${bots === 1 ? 'bot' : 'bots'}` : ''}
+              </span>
+            </div>
+            <ul className="mt-4 grid grid-cols-4 gap-x-2 gap-y-4">
+              {room.members.map((m, i) => (
+                <li key={m.id} className="pop relative flex flex-col items-center gap-1.5" style={{ animationDelay: `${i * 40}ms` }}>
+                  <Avatar emoji={m.avatar} size={52} host={m.id === room.hostId} badge={m.statusBadge} ring={m.id === me?.id ? 'me' : 'none'} />
+                  <span className="w-full truncate text-center text-xs font-semibold">
+                    {m.id === me?.id ? 'You' : m.name}
+                  </span>
+                  {m.isBot ? (
+                    <span className="-mt-1 text-[10px] font-medium capitalize text-[var(--peri)]">{m.botPersonality ?? 'bot'}</span>
+                  ) : null}
+                  {isHost && m.id !== me?.id ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        haptic(6);
+                        void api.removeMember(m.id);
+                      }}
+                      className="press absolute -top-1 right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--surface-3)] text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]"
+                      aria-label={`Remove ${m.name}`}
+                    >
+                      <X size={11} strokeWidth={3} />
+                    </button>
+                  ) : null}
+                </li>
+              ))}
+              {isHost ? (
+                <li className="flex flex-col items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      haptic(6);
+                      setBotMenu((v) => !v);
+                    }}
+                    aria-expanded={botMenu}
+                    className="press flex h-[52px] w-[52px] items-center justify-center rounded-full border-2 border-dashed border-[var(--line-strong)] text-[var(--muted)] hover:text-[var(--paper)]"
+                    aria-label="Add practice bot friend"
+                  >
+                    <Plus size={20} />
+                  </button>
+                  <span className="text-xs font-medium text-[var(--muted)]">Add bot</span>
+                </li>
+              ) : null}
+            </ul>
+
+            <div className="expander" data-open={botMenu && isHost}>
+              <div>
+                <div className="mt-4 rounded-2xl bg-[var(--ink-2)] p-3 shadow-[0_0_0_1px_var(--line)]">
+                  <p className="flex items-center gap-2 text-sm font-semibold">
+                    <Bot size={16} className="text-[var(--peri)]" /> Add a practice bot friend
+                  </p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    {PERSONALITIES.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => {
+                          haptic([6, 30, 6]);
+                          void api.addSimulatedMember(p.id);
+                        }}
+                        className="press rounded-xl bg-[var(--surface-2)] px-3 py-2.5 text-left shadow-[0_0_0_1px_var(--line)] hover:bg-[var(--surface-3)]"
+                      >
+                        <span className="block text-sm font-semibold">{p.label}</span>
+                        <span className="block text-xs text-[var(--muted)]">{p.hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex items-center justify-between gap-3 px-1">
+                    <span className="text-xs text-[var(--muted)]">Bots answer and react on their own</span>
+                    <Toggle
+                      checked={room.autoSimulateBots}
+                      onChange={(v) => void api.updateSettings({ autoSimulateBots: v })}
+                      label="Bots auto-play"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Mode selector */}
+          <section className="rise mt-4" style={{ animationDelay: '120ms' }}>
+            <div className="mb-2.5 flex items-baseline justify-between px-1">
+              <h2 className="font-display text-lg font-bold">How we play</h2>
+              {!isHost ? <span className="text-xs text-[var(--muted)]">Host decides</span> : null}
+            </div>
+            <div role="radiogroup" aria-label="Game mode" className="grid gap-2.5">
+              {MODES.map((m) => {
+                const active = room.mode === m.id;
+                const Icon = m.icon;
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    disabled={!isHost}
+                    onClick={() => {
+                      if (active) return;
+                      haptic(10);
+                      void api.updateSettings({ mode: m.id });
+                    }}
+                    className="press relative flex items-start gap-3.5 rounded-[22px] p-4 text-left disabled:cursor-default"
+                    style={{
+                      background: active ? 'var(--surface-2)' : 'var(--surface)',
+                      boxShadow: active
+                        ? `0 0 0 2px ${m.color}, 0 16px 30px -20px ${m.color}`
+                        : '0 0 0 1px var(--line)',
+                      opacity: !isHost && !active ? 0.55 : 1,
+                    }}
+                  >
+                    <span
+                      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[14px]"
+                      style={{ background: active ? m.color : 'var(--surface-3)', color: active ? 'var(--ink)' : m.color }}
+                    >
+                      <Icon size={20} strokeWidth={2.4} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block font-display text-[17px] font-bold">{m.title}</span>
+                      <span className="mt-0.5 block text-[13px] leading-snug text-[var(--muted)]">{m.body}</span>
+                    </span>
+                    <span
+                      className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full"
+                      style={{ boxShadow: active ? 'none' : 'inset 0 0 0 2px var(--line-strong)', background: active ? m.color : 'transparent' }}
+                    >
+                      {active ? <Check size={13} strokeWidth={3.5} className="text-[var(--ink)]" /> : null}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-3 flex items-center gap-2 overflow-x-auto px-1 no-scrollbar">
+              <span className="flex shrink-0 items-center gap-1.5 pr-1 text-xs font-semibold text-[var(--muted)]">
+                <Timer size={14} /> Per question
+              </span>
+              {TIMES.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className="chip shrink-0 tabular"
+                  data-active={room.timePerQuestion === t}
+                  disabled={!isHost}
+                  onClick={() => {
+                    haptic(5);
+                    void api.updateSettings({ timePerQuestion: t });
+                  }}
+                >
+                  {t}s
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {/* Question set */}
+          <section className="panel rise mt-4 p-4" style={{ animationDelay: '180ms' }}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="font-display text-lg font-bold leading-tight [text-wrap:balance]">{room.title}</h2>
+                <p className="mt-1 text-xs text-[var(--muted)] tabular">
+                  {room.questions.length} questions · about {Math.max(1, Math.round((room.questions.length * room.timePerQuestion) / 60))} min
+                </p>
+              </div>
+              <FileText size={20} className="mt-0.5 shrink-0 text-[var(--muted)]" />
+            </div>
+
+            {room.questions[0] ? (
+              <p className="mt-3 line-clamp-2 rounded-xl bg-[var(--ink-2)] px-3 py-2.5 text-[13px] leading-snug text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
+                <span className="font-semibold text-[var(--paper)]">Q1.</span> {room.questions[0].prompt}
+              </p>
+            ) : null}
+
+            {isHost ? (
+              <>
+                <div className="no-scrollbar -mx-4 mt-3 flex gap-2 overflow-x-auto px-4">
+                  {SAMPLE_EXAM_PACKS.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className="chip shrink-0"
+                      data-active={currentPackId === p.id}
+                      onClick={() => void loadPack(p.id)}
+                    >
+                      <span aria-hidden>{p.icon}</span>
+                      {p.category}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="btn-secondary mt-3 w-full justify-between"
+                  onClick={() => {
+                    haptic(6);
+                    setStudioOpen(true);
+                  }}
+                >
+                  <span className="flex items-center gap-2">
+                    <FileText size={17} /> Paste or upload Markdown
+                  </span>
+                  <ChevronRight size={18} className="text-[var(--muted)]" />
+                </button>
+              </>
+            ) : (
+              <p className="mt-3 text-xs text-[var(--muted)]">The host picks the questions.</p>
+            )}
+          </section>
+        </div>
+      </div>
+
+      {/* Sticky start */}
+      <div className="relative z-10 border-t border-[var(--line)] bg-[rgba(14,15,19,0.9)] px-5 py-3 backdrop-blur">
+        {isHost ? (
+          <button
+            type="button"
+            className="btn-primary h-14 w-full text-base"
+            disabled={starting || room.questions.length === 0}
+            onClick={start}
+          >
+            {starting ? <Loader2 size={20} className="animate-spin" /> : <Play size={19} fill="currentColor" />}
+            {room.questions.length === 0
+              ? 'Add questions to start'
+              : `Start ${room.mode === 'race' ? 'the race' : 'exam'} · ${room.questions.length} Qs`}
+          </button>
+        ) : (
+          <div className="flex h-14 items-center justify-center gap-2.5 rounded-2xl bg-[var(--surface)] text-sm font-medium text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
+            <Hourglass size={16} className="text-[var(--lime)]" />
+            Waiting for the host to start
+            <span className="thinking-dots">
+              <span />
+              <span />
+              <span />
+            </span>
+          </div>
+        )}
+      </div>
+
+      <MarkdownQuestionModal open={studioOpen} onClose={() => setStudioOpen(false)} api={api} />
+    </div>
+  );
+}

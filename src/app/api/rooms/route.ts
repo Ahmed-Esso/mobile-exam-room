@@ -1,0 +1,56 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { createRoomInStore, joinRoomInStore } from '@/lib/room-store';
+import { GameMode } from '@/types/exam';
+
+export const dynamic = 'force-dynamic';
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const action = body.action || 'create';
+    const memberId = String(body.memberId || `user-${Date.now()}`);
+    const name = String(body.name || 'Player').trim();
+    const avatar = String(body.avatar || '🦊');
+
+    if (action === 'join') {
+      const code = String(body.code || '').trim().toUpperCase();
+      if (!code) {
+        return NextResponse.json(
+          { error: 'Room code is required to join.' },
+          { status: 400 }
+        );
+      }
+      const room = joinRoomInStore({ code, memberId, name, avatar });
+      if (!room) {
+        return NextResponse.json(
+          { error: `Room "${code}" was not found. Check the 6-character code!` },
+          { status: 404 }
+        );
+      }
+      return NextResponse.json({ room });
+    }
+
+    const title = typeof body.title === 'string' ? body.title : undefined;
+    const mode: GameMode = body.mode === 'race' ? 'race' : 'wait';
+    const withBots = body.withBots !== false;
+
+    const room = createRoomInStore({
+      memberId,
+      name,
+      avatar,
+      title,
+      mode,
+      withBots,
+    });
+
+    return NextResponse.json({ room });
+  } catch (err) {
+    return NextResponse.json(
+      {
+        error:
+          err instanceof Error ? err.message : 'Failed to create or join room.',
+      },
+      { status: 500 }
+    );
+  }
+}
