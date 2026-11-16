@@ -8,6 +8,7 @@ import { haptic } from './ui';
 
 const LABELS: Record<string, string> = {
   '🐥': 'Chick',
+  '😜': 'Tease',
   '😂': 'Laugh',
   '🔥': 'Fire',
   '👏': 'Clap',

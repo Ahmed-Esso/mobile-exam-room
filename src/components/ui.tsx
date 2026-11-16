@@ -4,6 +4,7 @@ import { useEffect, useRef, type ReactNode } from 'react';
 import katex from 'katex';
 import { Crown, X } from 'lucide-react';
 import type { MemberAnswerTag } from '@/types/exam';
+import AnimalAvatarArt from './AnimalAvatarArt';
 
 /* -------------------------------------------------------------------------- */
 /* Haptics + clipboard                                                         */
@@ -75,7 +76,9 @@ export function Avatar({
       data-ring={ring}
       style={{ width: size, height: size, fontSize: Math.round(size * 0.52) }}
     >
-      <span aria-hidden>{emoji}</span>
+      <span className="flex h-full w-full items-center justify-center overflow-hidden rounded-full" aria-hidden>
+        <AnimalAvatarArt emoji={emoji} size={size} />
+      </span>
       {badge ? (
         <span
           key={badge}
@@ -120,8 +123,8 @@ export function MemberTag({
       style={{ animationDelay: `${delay}ms` }}
       title={`${tag.name} picked this · ${formatSeconds(tag.timeMs)}`}
     >
-      <span className="tag-avatar" aria-hidden>
-        {tag.avatar}
+      <span className="tag-avatar inline-flex items-center justify-center overflow-hidden rounded-full" aria-hidden>
+        <AnimalAvatarArt emoji={tag.avatar} size={16} />
       </span>
       {tag.isMe ? 'You' : tag.name}
       {tag.order === 1 ? <span className="text-[10px] opacity-60">1st</span> : null}

@@ -12,6 +12,7 @@ import {
   Infinity as InfinityIcon,
   Loader2,
   LogOut,
+  Pencil,
   Play,
   Send,
   Share2,
@@ -23,7 +24,9 @@ import {
 } from 'lucide-react';
 import type { GameMode, UseRoomReturn } from '@/types/exam';
 import { Avatar, Markdown, copyText, haptic } from './ui';
+import AnimalAvatarArt from './AnimalAvatarArt';
 import MarkdownQuestionModal from './MarkdownQuestionModal';
+import ProfileEditSheet from './ProfileEditSheet';
 import { InstallAppButton } from './InstallAppSheet';
 
 const TIMES = [0, 15, 30, 45, 60, 90];
@@ -49,6 +52,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
   const { room, me, isHost, account, allMembersReady, readyCount } = api;
   const [copied, setCopied] = useState<'code' | 'link' | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [starting, setStarting] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [invitedUsernames, setInvitedUsernames] = useState<Record<string, boolean>>({});
@@ -135,6 +139,19 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
               {confirmLeave ? 'Tap again to leave' : 'Leave'}
             </button>
             <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  haptic(6);
+                  setProfileOpen(true);
+                }}
+                aria-label="Edit profile"
+                className="press flex h-9 items-center gap-1.5 rounded-full bg-[var(--surface-2)] pl-1.5 pr-2.5 text-xs font-semibold text-[var(--paper)] shadow-[0_0_0_1px_var(--line)]"
+              >
+                <AnimalAvatarArt emoji={me?.avatar || '🐥'} size={22} />
+                <span>Profile</span>
+                <Pencil size={11} className="text-[var(--muted)]" />
+              </button>
               <InstallAppButton compact />
               <span className="flex items-center gap-1.5 rounded-full bg-[var(--surface-2)] px-3 py-1.5 text-xs font-semibold text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
                 <span className="live-dot h-1.5 w-1.5 rounded-full bg-[var(--lime)]" />
@@ -272,7 +289,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                         className="chip shrink-0 text-xs"
                         data-active={invited}
                       >
-                        <span>{f.avatar || '🐥'}</span>
+                        <AnimalAvatarArt emoji={f.avatar || '🐥'} size={18} />
                         <span className="max-w-[100px] truncate">@{f.username}</span>
                         {alreadyInRoom ? (
                           <span className="text-[10px] text-[var(--lime)]">In room</span>
@@ -522,6 +539,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
       </div>
 
       <MarkdownQuestionModal open={studioOpen} onClose={() => setStudioOpen(false)} api={api} />
+      <ProfileEditSheet open={profileOpen} onClose={() => setProfileOpen(false)} api={api} />
     </div>
   );
 }

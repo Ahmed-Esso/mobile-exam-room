@@ -189,6 +189,7 @@ export interface UserAccount {
   avatar: string;
   pictureUrl?: string;
   googleVerified?: boolean;
+  geminiApiKey?: string;
   friends: FriendEntry[];
   invites: RoomInvite[];
   updatedAt: number;
@@ -228,9 +229,17 @@ export interface UseRoomReturn {
   leaderboard: Member[];
   activeReactions: EmojiReaction[];
 
-  // Google OAuth Account, @username Friends & Live Room Invites
+  // Google OAuth Account, @username Friends, Profile & Gemini Key
   account: UserAccount | null;
   googleClientId: string;
+  geminiApiKey: string;
+  setGeminiApiKey: (key: string) => void;
+  updateMemberProfile: (params: {
+    name?: string;
+    avatar?: string;
+    username?: string;
+    geminiApiKey?: string;
+  }) => Promise<void>;
   saveGoogleClientId: (clientId: string) => Promise<void>;
   loginWithGoogle: (params: {
     googleCredential?: string;
@@ -282,25 +291,22 @@ export interface UseRoomReturn {
 
 export const AVATAR_OPTIONS: string[] = [
   '🐥',
-  '🐣',
-  '🐤',
+  '🦋',
+  '🐬',
+  '🦉',
+  '🐐',
   '🦊',
   '🐼',
   '🦁',
   '🐸',
-  '🦉',
-  '🐙',
-  '🦄',
-  '🐯',
+  '🐱',
   '🐨',
-  '🦖',
-  '🐝',
-  '🐧',
-  '🦋',
+  '🦄',
 ];
 
 export const ZOOM_REACTIONS: string[] = [
   '🐥',
+  '😜',
   '😂',
   '🔥',
   '👏',
@@ -367,6 +373,13 @@ export const CONTEXTUAL_PEER_RIGHT_REACTIONS: ContextualReactionPreset[] = [
 ];
 
 export const CONTEXTUAL_TWIN_RIGHT_REACTIONS: ContextualReactionPreset[] = [
+  {
+    id: 'too-easy-tease',
+    emoji: '😜',
+    label: 'Too easy!',
+    kind: 'contextual-both-right',
+    description: 'Easy clap, barely broke a sweat!',
+  },
   {
     id: 'twin-brain',
     emoji: '🤝',

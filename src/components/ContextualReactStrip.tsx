@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Member, ReactionKind, RoomState, UseRoomReturn } from '@/types/exam';
 import { emitLocalReaction } from './EmojiReactionOverlay';
+import AnimalAvatarArt from './AnimalAvatarArt';
 import { haptic } from './ui';
 
 type Relation = 'they-right-me-wrong' | 'both-right' | 'me-right-they-wrong';
@@ -11,16 +12,19 @@ const QUICK: Record<Relation, { emoji: string; label: string }[]> = {
   'they-right-me-wrong': [
     { emoji: '💀', label: 'How?!' },
     { emoji: '🫡', label: 'Teach me' },
+    { emoji: '😜', label: 'Show off!' },
     { emoji: '😭', label: 'Pain' },
     { emoji: '🔥', label: 'Respect' },
   ],
   'both-right': [
-    { emoji: '💀', label: 'Too easy' },
+    { emoji: '😜', label: 'Too easy!' },
     { emoji: '🫡', label: 'Twin brain!' },
-    { emoji: '😭', label: 'Phew' },
     { emoji: '🔥', label: 'We cooked' },
+    { emoji: '💀', label: 'Light work' },
+    { emoji: '😭', label: 'Phew' },
   ],
   'me-right-they-wrong': [
+    { emoji: '😜', label: 'Too easy!' },
     { emoji: '💀', label: 'RIP' },
     { emoji: '🫡', label: 'Next one’s yours' },
     { emoji: '😭', label: 'Pain' },
@@ -126,10 +130,10 @@ export default function ContextualReactStrip({ api, room }: { api: UseRoomReturn
       >
         <span
           key={active.member.id}
-          className="pop flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--surface-3)] text-lg"
+          className="pop flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[var(--surface-3)]"
           style={{ boxShadow: `0 0 0 2px ${accent}` }}
         >
-          {active.member.avatar}
+          <AnimalAvatarArt emoji={active.member.avatar} size={36} />
         </span>
         <span className="min-w-0 leading-tight">
           <span className="block truncate text-[13px] font-bold">{active.member.name}</span>
@@ -149,7 +153,7 @@ export default function ContextualReactStrip({ api, room }: { api: UseRoomReturn
               onClick={() => fire(q)}
               title={q.label}
               aria-label={`${q.label} to ${active.member.name}`}
-              className="press flex h-10 w-10 items-center justify-center rounded-full text-[20px] hover:bg-white/5"
+              className="press flex h-8 w-8 items-center justify-center rounded-full text-[18px] hover:bg-white/5"
               style={done ? { background: 'var(--paper)' } : undefined}
             >
               <span key={done ? 'd' : 'n'} className={done ? 'emoji-tap inline-block' : 'inline-block'}>

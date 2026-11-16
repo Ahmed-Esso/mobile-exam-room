@@ -23,6 +23,7 @@ import {
   parseMarkdownQuestions,
 } from '@/lib/markdown-parser';
 import { LETTERS, Markdown, Sheet, Toggle, copyText, haptic } from './ui';
+import ProfileEditSheet from './ProfileEditSheet';
 
 const KEY_STORAGE = 'exam_room_gemini_key_v1';
 
@@ -66,18 +67,23 @@ export default function MarkdownQuestionModal({
   const [expanded, setExpanded] = useState<number | null>(0);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [promptPreviewOpen, setPromptPreviewOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const mdFileRef = useRef<HTMLInputElement>(null);
   const mediaFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
     setResult(null);
+    if (api.geminiApiKey) {
+      setApiKey(api.geminiApiKey);
+      return;
+    }
     try {
       setApiKey(window.localStorage.getItem(KEY_STORAGE) ?? '');
     } catch {
       /* ignore */
     }
-  }, [open]);
+  }, [open, api.geminiApiKey]);
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebounced(markdown), 220);
@@ -190,6 +196,7 @@ export default function MarkdownQuestionModal({
     setResult(null);
     haptic([10, 30, 10]);
     try {
+      api.setGeminiApiKey(apiKey.trim());
       try {
         if (apiKey.trim()) window.localStorage.setItem(KEY_STORAGE, apiKey.trim());
         else window.localStorage.removeItem(KEY_STORAGE);
@@ -232,6 +239,7 @@ export default function MarkdownQuestionModal({
   };
 
   return (
+    <>
     <Sheet
       open={open}
       onClose={onClose}
@@ -300,6 +308,25 @@ export default function MarkdownQuestionModal({
           </span>
         </div>
 
+        {api.geminiApiKey.trim() ? (
+          <div className="mt-3 flex items-center justify-between gap-2 rounded-xl bg-[rgba(215,255,63,0.12)] px-3 py-2 text-xs font-semibold text-[var(--lime)]">
+            <span className="flex items-center gap-1.5">
+              <Check size={14} className="shrink-0" />
+              Gemini API Key loaded from your Profile — PDF &amp; Screenshot upload unlocked!
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                haptic(5);
+                setProfileOpen(true);
+              }}
+              className="shrink-0 underline underline-offset-2 opacity-90 hover:opacity-100"
+            >
+              Edit Profile
+            </button>
+          </div>
+        ) : null}
+
         <label htmlFor="gemini-key" className="label mt-3 flex items-center gap-1.5">
           <KeyRound size={13} /> Gemini API Key
         </label>
@@ -313,6 +340,7 @@ export default function MarkdownQuestionModal({
           onChange={(e) => {
             const val = e.target.value;
             setApiKey(val);
+            api.setGeminiApiKey(val.trim());
             try {
               if (val.trim()) window.localStorage.setItem(KEY_STORAGE, val.trim());
               else window.localStorage.removeItem(KEY_STORAGE);
@@ -324,17 +352,29 @@ export default function MarkdownQuestionModal({
 
         <div className="mt-3 rounded-2xl border-2 border-dashed border-[var(--line-strong)] bg-[var(--ink-2)] p-3.5">
           {!hasApiKey ? (
-            <div className="flex items-center justify-between gap-3">
-              <p className="flex items-center gap-2 text-xs font-semibold text-[var(--amber)]">
-                <Lock size={14} className="shrink-0" />
-                Put your Gemini API key first to unlock PDF &amp; Screenshot uploads
-              </p>
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <p className="flex items-center gap-2 text-xs font-semibold text-[var(--amber)]">
+                  <Lock size={14} className="shrink-0" />
+                  Put your Gemini API key first to unlock PDF &amp; Screenshot uploads
+                </p>
+                <button
+                  type="button"
+                  disabled
+                  className="btn-secondary !min-h-[38px] shrink-0 !px-3 text-xs"
+                >
+                  <FileUp size={14} /> Locked
+                </button>
+              </div>
               <button
                 type="button"
-                disabled
-                className="btn-secondary !min-h-[38px] shrink-0 !px-3 text-xs"
+                onClick={() => {
+                  haptic(6);
+                  setProfileOpen(true);
+                }}
+                className="btn-secondary !min-h-[36px] w-full !rounded-xl text-xs"
               >
-                <FileUp size={14} /> Locked
+                <KeyRound size={13} /> Add Gemini API Key in Profile
               </button>
             </div>
           ) : (
@@ -620,5 +660,7 @@ export default function MarkdownQuestionModal({
         </div>
       )}
     </Sheet>
+    <ProfileEditSheet open={profileOpen} onClose={() => setProfileOpen(false)} api={api} />
+    </>
   );
 }

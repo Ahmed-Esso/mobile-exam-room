@@ -21,8 +21,10 @@ import {
 } from 'lucide-react';
 import { AVATAR_OPTIONS, type PublicDirectoryUser, type UseRoomReturn } from '@/types/exam';
 import { Avatar, copyText, haptic } from './ui';
+import AnimalAvatarArt from './AnimalAvatarArt';
 import RoomLobby from './RoomLobby';
 import GoogleSignInSheet from './GoogleSignInSheet';
+import ProfileEditSheet from './ProfileEditSheet';
 import { InstallAppButton } from './InstallAppSheet';
 import { ANIMAL_NAMES, autoName, extractRoomCode, readProfile, saveProfile } from './profile';
 
@@ -59,6 +61,7 @@ function JoinScreen({
   const [avatarSpin, setAvatarSpin] = useState(0);
   const [codeFocused, setCodeFocused] = useState(false);
   const [signInOpen, setSignInOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
 
   // @username editing + friend lookup
   const [editingHandle, setEditingHandle] = useState(false);
@@ -300,6 +303,27 @@ function JoinScreen({
 
         {/* Profile */}
         <section className="panel rise mt-5 p-4" style={{ animationDelay: '60ms' }}>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-[var(--muted)]">
+              Your profile
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                haptic(6);
+                setProfileOpen(true);
+              }}
+              className="chip !h-7 !min-h-0 !px-2.5 text-[11px]"
+            >
+              <Pencil size={11} />
+              Edit Profile
+              {api.geminiApiKey ? (
+                <span className="ml-0.5 rounded-full bg-[var(--lime)] px-1.5 py-0.5 text-[9px] font-extrabold text-[var(--ink)]">
+                  AI ✓
+                </span>
+              ) : null}
+            </button>
+          </div>
           <div className="flex items-center gap-4">
             <button
               type="button"
@@ -405,14 +429,14 @@ function JoinScreen({
                 onClick={() => pickAvatar(a)}
                 aria-label={`Avatar ${ANIMAL_NAMES[a] ?? a}`}
                 aria-pressed={a === avatar}
-                className="press flex h-11 w-11 shrink-0 items-center justify-center rounded-[14px] text-[22px]"
+                className="press flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-[14px]"
                 style={{
-                  background: a === avatar ? 'var(--paper)' : 'var(--surface-2)',
-                  boxShadow: a === avatar ? 'none' : '0 0 0 1px var(--line)',
+                  background: a === avatar ? 'var(--surface-3)' : 'var(--surface-2)',
+                  boxShadow: a === avatar ? '0 0 0 2px var(--lime)' : '0 0 0 1px var(--line)',
                   transform: a === avatar ? 'translateY(-2px)' : undefined,
                 }}
               >
-                {a}
+                <AnimalAvatarArt emoji={a} size={36} />
               </button>
             ))}
           </div>
@@ -637,7 +661,7 @@ function JoinScreen({
                       className="press flex w-full items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-white/5"
                     >
                       <span className="flex min-w-0 items-center gap-2">
-                        <span className="text-lg">{u.avatar || '🐥'}</span>
+                        <Avatar emoji={u.avatar || '🐥'} size={32} />
                         <span className="min-w-0">
                           <span className="block truncate text-xs font-bold">{u.name}</span>
                           <span className="block truncate text-[11px] text-[var(--lime)]">
@@ -719,6 +743,18 @@ function JoinScreen({
         onClose={() => setSignInOpen(false)}
         api={api}
         currentAvatar={avatar}
+      />
+      <ProfileEditSheet
+        open={profileOpen}
+        onClose={() => setProfileOpen(false)}
+        api={api}
+        initialName={name}
+        initialAvatar={avatar}
+        onSaved={({ name: nextName, avatar: nextAvatar }) => {
+          setName(nextName);
+          setAvatar(nextAvatar);
+          setCustom(true);
+        }}
       />
     </div>
   );

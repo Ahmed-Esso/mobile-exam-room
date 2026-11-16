@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import type { UseRoomReturn } from '@/types/exam';
 import { LETTERS, Markdown, MemberTag, formatSeconds, haptic } from './ui';
+import AnimalAvatarArt from './AnimalAvatarArt';
 import MemberStrip from './MemberStrip';
 import ContextualReactStrip from './ContextualReactStrip';
 import ReactionDock from './ReactionDock';
@@ -501,7 +502,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                         {breakdown.right.map((m, i) => (
                           <li key={m.id} className="flex items-center justify-between gap-1 text-xs">
                             <span className="flex min-w-0 items-center gap-1.5 font-semibold">
-                              <span>{m.avatar}</span>
+                              <AnimalAvatarArt emoji={m.avatar} size={16} />
                               <span className="truncate">{m.id === me?.id ? 'You' : m.name}</span>
                               {i === 0 && room.mode === 'race' ? (
                                 <span className="rounded bg-[var(--amber)] px-1 text-[9px] font-extrabold text-[var(--ink)]">1ST</span>
@@ -524,7 +525,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                         {breakdown.wrong.map((m) => (
                           <li key={m.id} className="flex items-center justify-between gap-1 text-xs">
                             <span className="flex min-w-0 items-center gap-1.5 font-medium text-[var(--muted)]">
-                              <span>{m.avatar}</span>
+                              <AnimalAvatarArt emoji={m.avatar} size={16} />
                               <span className="truncate">{m.id === me?.id ? 'You' : m.name}</span>
                             </span>
                             <span className="code-cell shrink-0 rounded bg-[var(--surface-3)] px-1.5 text-[10px] font-bold text-[var(--muted)]">

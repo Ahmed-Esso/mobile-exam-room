@@ -6,21 +6,24 @@ export const PROFILE_KEY = 'exam_room_profile_v1';
 
 export const ANIMAL_NAMES: Record<string, string> = {
   '🐥': 'Chick',
-  '🐣': 'Hatchling',
-  '🐤': 'Birdie',
+  '🦋': 'Butterfly',
+  '🐬': 'Dolphin',
+  '🦉': 'Owl',
+  '🐐': 'Goat',
   '🦊': 'Fox',
   '🐼': 'Panda',
   '🦁': 'Lion',
   '🐸': 'Frog',
-  '🦉': 'Owl',
-  '🐙': 'Octo',
-  '🦄': 'Unicorn',
-  '🐯': 'Tiger',
+  '🐱': 'Cat',
   '🐨': 'Koala',
+  '🦄': 'Unicorn',
+  '🐣': 'Chick',
+  '🐤': 'Chick',
+  '🐙': 'Octo',
+  '🐯': 'Tiger',
   '🦖': 'Rex',
   '🐝': 'Bee',
   '🐧': 'Pingu',
-  '🦋': 'Flutter',
 };
 
 const ADJECTIVES = ['Swift', 'Clever', 'Lucky', 'Bold', 'Sneaky', 'Sharp', 'Calm', 'Turbo', 'Witty', 'Brave'];

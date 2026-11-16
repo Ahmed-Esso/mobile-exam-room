@@ -801,6 +801,24 @@ export function mutateRoomInStore(
       break;
     }
 
+    case 'updateProfile': {
+      if (actingMember) {
+        if (typeof payload.name === 'string' && payload.name.trim()) {
+          actingMember.name = payload.name.trim();
+        }
+        if (typeof payload.avatar === 'string' && payload.avatar.trim()) {
+          actingMember.avatar = payload.avatar.trim();
+        }
+        if (typeof payload.username === 'string' && payload.username.trim()) {
+          actingMember.username = payload.username.trim().toLowerCase();
+        }
+        actingMember.lastSeenAt = now;
+        room.version += 1;
+        room.updatedAt = now;
+      }
+      break;
+    }
+
     case 'updateSettings': {
       const settings = (payload.settings || payload) as RoomSettingsUpdate;
       if (typeof settings.title === 'string' && settings.title.trim()) {

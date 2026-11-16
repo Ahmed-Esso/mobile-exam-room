@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { STATUS_BADGES, type EmojiReaction, type ReactionKind } from '@/types/exam';
+import AnimalAvatarArt from './AnimalAvatarArt';
 import { haptic } from './ui';
 
 /* -------------------------------------------------------------------------- */
@@ -310,13 +311,13 @@ function BannerCard({ b }: { b: Banner }) {
         {b.emoji}
       </span>
       <div className="min-w-0 flex-1">
-        <p className="flex items-center gap-1 truncate text-[12px] font-semibold text-[var(--muted)]">
-          <span>{b.senderAvatar}</span>
+        <p className="flex items-center gap-1.5 truncate text-[12px] font-semibold text-[var(--muted)]">
+          <AnimalAvatarArt emoji={b.senderAvatar} size={16} />
           <span className="truncate text-[var(--paper)]">{sender}</span>
           {b.targetAvatar || target ? (
             <>
               <span aria-hidden>→</span>
-              <span>{b.targetAvatar}</span>
+              {b.targetAvatar ? <AnimalAvatarArt emoji={b.targetAvatar} size={16} /> : null}
               <span className="truncate text-[var(--paper)]">{b.toMe ? 'You' : b.targetName}</span>
             </>
           ) : null}

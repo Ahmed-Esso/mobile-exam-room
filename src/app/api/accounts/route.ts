@@ -130,6 +130,10 @@ export function mergeAccounts(a: UserAccount, b: UserAccount): UserAccount {
     avatar: primary.avatar || a.avatar || b.avatar || '🐥',
     pictureUrl: primary.pictureUrl || a.pictureUrl || b.pictureUrl,
     googleVerified: Boolean(a.googleVerified || b.googleVerified),
+    geminiApiKey:
+      primary.geminiApiKey !== undefined
+        ? primary.geminiApiKey
+        : a.geminiApiKey || b.geminiApiKey,
     friends: Array.from(friendMap.values()).sort((x, y) => x.addedAt - y.addedAt),
     invites: Array.from(inviteMap.values()).sort((x, y) => y.createdAt - x.createdAt),
     updatedAt: Math.max(a.updatedAt || now, b.updatedAt || now),
@@ -430,6 +434,81 @@ export async function POST(req: NextRequest) {
               updatedAt: now,
             });
           }
+        }
+      }
+
+      saveDiskData(store);
+      return NextResponse.json({ account: updated });
+    }
+
+    if (action === 'updateProfile') {
+      const email = normalizeEmail(body.email);
+      if (!isValidEmail(email)) {
+        return NextResponse.json({ error: 'Invalid account email.' }, { status: 400 });
+      }
+      const acc = store.accounts.get(email) || (body.account as UserAccount | undefined);
+      if (!acc) {
+        return NextResponse.json({ error: 'Account not found.' }, { status: 404 });
+      }
+
+      let nextUsername = acc.username;
+      if (typeof body.newUsername === 'string' && body.newUsername.trim()) {
+        const cleanNew = normalizeUsername(body.newUsername);
+        if (!isValidUsername(cleanNew)) {
+          return NextResponse.json(
+            {
+              error:
+                'Username must be 3–20 characters using only lowercase letters, numbers, underscores (_), or dots (.).',
+            },
+            { status: 400 }
+          );
+        }
+        const taken = findAccountByUsername(store, cleanNew);
+        if (taken && taken.email !== email) {
+          return NextResponse.json(
+            { error: `@${cleanNew} is already taken. Try another username.` },
+            { status: 409 }
+          );
+        }
+        nextUsername = cleanNew;
+      }
+
+      const oldUsername = acc.username;
+      const nextName =
+        typeof body.name === 'string' && body.name.trim()
+          ? body.name.trim()
+          : acc.name;
+      const nextAvatar =
+        typeof body.avatar === 'string' && body.avatar.trim()
+          ? body.avatar.trim()
+          : acc.avatar;
+      const nextGeminiKey =
+        typeof body.geminiApiKey === 'string'
+          ? body.geminiApiKey.trim()
+          : acc.geminiApiKey;
+
+      const updated: UserAccount = {
+        ...acc,
+        username: nextUsername,
+        name: nextName,
+        avatar: nextAvatar,
+        geminiApiKey: nextGeminiKey,
+        updatedAt: now,
+      };
+      store.accounts.set(email, updated);
+
+      // Update username/name/avatar references in friends' lists
+      for (const [k, otherAcc] of Array.from(store.accounts.entries())) {
+        if (otherAcc.friends.some((f) => f.username === oldUsername)) {
+          store.accounts.set(k, {
+            ...otherAcc,
+            friends: otherAcc.friends.map((f) =>
+              f.username === oldUsername
+                ? { ...f, username: nextUsername, name: nextName, avatar: nextAvatar }
+                : f
+            ),
+            updatedAt: now,
+          });
         }
       }
 

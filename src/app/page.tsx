@@ -10,7 +10,7 @@ import EmojiReactionOverlay from '@/components/EmojiReactionOverlay';
 import PullToRefresh from '@/components/PullToRefresh';
 import { AVATAR_OPTIONS, type RoomInvite } from '@/types/exam';
 import { autoName, readProfile } from '@/components/profile';
-import { haptic } from '@/components/ui';
+import { Avatar, haptic } from '@/components/ui';
 
 const STORAGE_ACTIVE_ROOM_KEY = 'exam_room_active_code_v1';
 
@@ -76,9 +76,7 @@ export default function HomePage() {
           {latestInvite ? (
             <div className="banner-in pt-safe absolute inset-x-4 top-2 z-50">
               <div className="glass flex items-center gap-2.5 rounded-2xl px-3 py-2.5 shadow-[0_0_0_1.5px_var(--lime),0_18px_40px_-14px_rgba(0,0,0,0.85)]">
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--surface-2)] text-xl">
-                  {latestInvite.fromAvatar || '🐥'}
-                </span>
+                <Avatar emoji={latestInvite.fromAvatar || '🐥'} size={36} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-xs font-bold text-[var(--paper)]">
                     @{latestInvite.fromUsername} invited you to Room{' '}

@@ -26,6 +26,8 @@ const STORAGE_MEMBER_ID_KEY = 'exam_room_member_id_v2';
 const STORAGE_ACTIVE_ROOM_KEY = 'exam_room_active_code_v2';
 const STORAGE_ACCOUNT_KEY = 'exam_room_account_v4';
 const STORAGE_GOOGLE_CLIENT_ID_KEY = 'exam_room_google_client_id_v1';
+const STORAGE_GEMINI_KEY = 'exam_room_gemini_key_v1';
+const STORAGE_PROFILE_KEY = 'exam_room_profile_v1';
 const BROADCAST_CHANNEL_NAME = 'exam_room_live_channel_v2';
 const REACTION_TTL_MS = 6500;
 
@@ -55,6 +57,7 @@ export function useRoom(): UseRoomReturn {
   const [googleClientId, setGoogleClientId] = useState<string>(
     process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || ''
   );
+  const [geminiApiKey, setGeminiApiKeyState] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
@@ -77,7 +80,15 @@ export function useRoom(): UseRoomReturn {
         if (parsed?.email && parsed?.username && parsed?.googleVerified) {
           setAccount(parsed);
           accountRef.current = parsed;
+          if (parsed.geminiApiKey) {
+            setGeminiApiKeyState(parsed.geminiApiKey);
+            window.localStorage.setItem(STORAGE_GEMINI_KEY, parsed.geminiApiKey);
+          }
         }
+      }
+      const savedGeminiKey = window.localStorage.getItem(STORAGE_GEMINI_KEY);
+      if (savedGeminiKey) {
+        setGeminiApiKeyState(savedGeminiKey);
       }
       const savedCid = window.localStorage.getItem(STORAGE_GOOGLE_CLIENT_ID_KEY);
       if (savedCid && !process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID) {
@@ -494,6 +505,55 @@ export function useRoom(): UseRoomReturn {
       clearInterval(interval);
     };
   }, [room?.code, memberId]);
+
+  // Sync geminiApiKey when account syncs from server
+  useEffect(() => {
+    if (account?.geminiApiKey && account.geminiApiKey !== geminiApiKey) {
+      setGeminiApiKeyState(account.geminiApiKey);
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(STORAGE_GEMINI_KEY, account.geminiApiKey);
+        } catch {
+          // Ignore
+        }
+      }
+    }
+  }, [account?.geminiApiKey, geminiApiKey]);
+
+  const setGeminiApiKey = useCallback((key: string) => {
+    const trimmed = key.trim();
+    setGeminiApiKeyState(trimmed);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(STORAGE_GEMINI_KEY, trimmed);
+        window.dispatchEvent(
+          new CustomEvent('exam-room-gemini-key-updated', { detail: trimmed })
+        );
+      } catch {
+        // Ignore
+      }
+    }
+
+    const currentAcc = accountRef.current;
+    if (currentAcc) {
+      const updatedAcc = {
+        ...currentAcc,
+        geminiApiKey: trimmed,
+        updatedAt: Date.now(),
+      };
+      setAccount(updatedAcc);
+      void fetch('/api/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'updateProfile',
+          email: currentAcc.email,
+          account: currentAcc,
+          geminiApiKey: trimmed,
+        }),
+      }).catch(() => {});
+    }
+  }, []);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -1164,6 +1224,87 @@ export function useRoom(): UseRoomReturn {
     [postRoomAction]
   );
 
+  const updateMemberProfile = useCallback(
+    async (params: {
+      name?: string;
+      avatar?: string;
+      username?: string;
+      geminiApiKey?: string;
+    }) => {
+      setError(null);
+      const nextName = params.name?.trim();
+      const nextAvatar = params.avatar?.trim();
+
+      if (typeof params.geminiApiKey === 'string') {
+        setGeminiApiKey(params.geminiApiKey);
+      }
+
+      // Persist local profile preference
+      if (typeof window !== 'undefined' && (nextName || nextAvatar)) {
+        try {
+          const prevRaw = window.localStorage.getItem(STORAGE_PROFILE_KEY);
+          const prev = prevRaw ? JSON.parse(prevRaw) : {};
+          window.localStorage.setItem(
+            STORAGE_PROFILE_KEY,
+            JSON.stringify({
+              name: nextName || prev.name || '',
+              avatar: nextAvatar || prev.avatar || '🐥',
+            })
+          );
+          window.dispatchEvent(
+            new CustomEvent('exam-room-profile-updated', {
+              detail: { name: nextName, avatar: nextAvatar },
+            })
+          );
+        } catch {
+          // Ignore
+        }
+      }
+
+      // Update Google account on server if logged in
+      const currentAcc = accountRef.current;
+      if (currentAcc) {
+        try {
+          const res = await fetch('/api/accounts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'updateProfile',
+              email: currentAcc.email,
+              account: currentAcc,
+              name: nextName,
+              avatar: nextAvatar,
+              newUsername: params.username,
+              geminiApiKey: params.geminiApiKey,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data?.error || 'Could not update profile.');
+          }
+          if (data?.account) {
+            setAccount(data.account);
+          }
+        } catch (err) {
+          setError(
+            err instanceof Error ? err.message : 'Failed to update profile'
+          );
+          return;
+        }
+      }
+
+      // Update active room member if inside a room
+      if (roomRef.current?.code) {
+        await postRoomAction('updateProfile', {
+          name: nextName,
+          avatar: nextAvatar,
+          username: params.username?.trim().replace(/^@+/, '').toLowerCase(),
+        });
+      }
+    },
+    [postRoomAction, setGeminiApiKey]
+  );
+
   // Derived states
   const me = useMemo<Member | null>(() => {
     if (!room) return null;
@@ -1355,6 +1496,9 @@ export function useRoom(): UseRoomReturn {
     activeReactions,
     account,
     googleClientId,
+    geminiApiKey,
+    setGeminiApiKey,
+    updateMemberProfile,
     saveGoogleClientId,
     loginWithGoogle,
     logoutAccount,
