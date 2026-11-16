@@ -1,36 +1,30 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { AtSign, Loader2, Mail, ShieldCheck, User } from 'lucide-react';
 import type { UseRoomReturn } from '@/types/exam';
-import { Sheet, copyText, haptic } from './ui';
+import { readProfile } from './profile';
+import { Sheet, haptic } from './ui';
 
-declare global {
-  interface Window {
-    google?: {
-      accounts?: {
-        id?: {
-          initialize: (cfg: {
-            client_id: string;
-            callback: (res: { credential?: string }) => void;
-          }) => void;
-          renderButton: (
-            el: HTMLElement,
-            opts: { theme?: string; size?: string; width?: number; shape?: string; text?: string }
-          ) => void;
-        };
-        oauth2?: {
-          initTokenClient: (cfg: {
-            client_id: string;
-            scope: string;
-            callback: (res: { access_token?: string; error?: string; error_description?: string }) => void;
-          }) => {
-            requestAccessToken: (opts?: { prompt?: string }) => void;
-          };
-        };
-      };
-    };
-  }
+function suggestHandle(email: string, name: string): string {
+  const source = email.includes('@') ? email.split('@')[0] : name;
+  return source
+    .toLowerCase()
+    .replace(/[^a-z0-9_.]/g, '')
+    .replace(/^[._]+|[._]+$/g, '')
+    .slice(0, 20);
+}
+
+function suggestName(email: string): string {
+  const prefix = email.split('@')[0] ?? '';
+  const cleaned = prefix.replace(/[._-]+/g, ' ').trim();
+  if (!cleaned) return '';
+  return cleaned
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+    .slice(0, 18);
 }
 
 export default function GoogleSignInSheet({
@@ -44,285 +38,157 @@ export default function GoogleSignInSheet({
   api: UseRoomReturn;
   currentAvatar: string;
 }) {
-  const activeClientId = (
-    api.googleClientId ||
-    process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ||
-    ''
-  ).trim();
-
-  const [gisReady, setGisReady] = useState(false);
+  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
+  const [usernameEdited, setUsernameEdited] = useState(false);
+  const [displayName, setDisplayName] = useState('');
+  const [nameEdited, setNameEdited] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-  const [showSetup, setShowSetup] = useState(false);
-  const [clientIdInput, setClientIdInput] = useState('');
-  const [savingClientId, setSavingClientId] = useState(false);
-  const [copiedOrigin, setCopiedOrigin] = useState(false);
-
-  const gisBtnRef = useRef<HTMLDivElement>(null);
-  const tokenClientRef = useRef<{ requestAccessToken: (opts?: { prompt?: string }) => void } | null>(null);
-  const apiRef = useRef(api);
-  apiRef.current = api;
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
     setLocalError(null);
-    setClientIdInput(activeClientId);
-  }, [open, activeClientId]);
-
-  const initGoogleSdk = useCallback(() => {
-    if (!activeClientId || typeof window === 'undefined' || !window.google?.accounts) return;
-
-    // 1. Setup OAuth2 Token Client (triggers real accounts.google.com account chooser popup)
-    if (window.google.accounts.oauth2) {
-      tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
-        client_id: activeClientId,
-        scope: 'openid email profile',
-        callback: async (tokenResponse) => {
-          if (tokenResponse.error || !tokenResponse.access_token) {
-            setLocalError(
-              tokenResponse.error_description ||
-                tokenResponse.error ||
-                'Google sign-in was cancelled.'
-            );
-            setSubmitting(false);
-            return;
-          }
-          setSubmitting(true);
-          const acc = await apiRef.current.loginWithGoogle({
-            googleAccessToken: tokenResponse.access_token,
-            avatar: currentAvatar,
-          });
-          setSubmitting(false);
-          if (acc) {
-            haptic([10, 35, 10]);
-            onCloseRef.current();
-          } else if (apiRef.current.error) {
-            setLocalError(apiRef.current.error);
-          }
-        },
-      });
+    const localProf = readProfile();
+    if (localProf?.name && !nameEdited) {
+      setDisplayName(localProf.name);
     }
+  }, [open, nameEdited]);
 
-    // 2. Setup Google Identity Services Sign-In Button
-    if (window.google.accounts.id && gisBtnRef.current) {
-      window.google.accounts.id.initialize({
-        client_id: activeClientId,
-        callback: async (response) => {
-          if (!response.credential) return;
-          setSubmitting(true);
-          const acc = await apiRef.current.loginWithGoogle({
-            googleCredential: response.credential,
-            avatar: currentAvatar,
-          });
-          setSubmitting(false);
-          if (acc) {
-            haptic([10, 35, 10]);
-            onCloseRef.current();
-          } else if (apiRef.current.error) {
-            setLocalError(apiRef.current.error);
-          }
-        },
-      });
-      gisBtnRef.current.innerHTML = '';
-      window.google.accounts.id.renderButton(gisBtnRef.current, {
-        theme: 'filled_black',
-        size: 'large',
-        width: 320,
-        shape: 'pill',
-        text: 'continue_with',
-      });
-    }
-
-    setGisReady(true);
-  }, [activeClientId, currentAvatar]);
-
-  useEffect(() => {
-    if (!open || !activeClientId || typeof window === 'undefined') return;
-
-    if (window.google?.accounts?.id || window.google?.accounts?.oauth2) {
-      initGoogleSdk();
-      return;
-    }
-
-    let existing = document.querySelector<HTMLScriptElement>(
-      'script[src="https://accounts.google.com/gsi/client"]'
-    );
-    if (!existing) {
-      existing = document.createElement('script');
-      existing.src = 'https://accounts.google.com/gsi/client';
-      existing.async = true;
-      existing.defer = true;
-      document.head.appendChild(existing);
-    }
-
-    const onLoad = () => initGoogleSdk();
-    existing.addEventListener('load', onLoad);
-    return () => {
-      existing?.removeEventListener('load', onLoad);
-    };
-  }, [open, activeClientId, initGoogleSdk]);
-
-  const handlePopupClick = () => {
+  const handleEmailChange = (val: string) => {
+    setEmail(val);
     setLocalError(null);
-    if (!tokenClientRef.current) {
-      setLocalError('Google Sign-In is still loading — please tap again in a second.');
-      initGoogleSdk();
-      return;
+    if (!usernameEdited) {
+      setUsername(suggestHandle(val, displayName));
     }
-    haptic([8, 25, 8]);
-    setSubmitting(true);
-    try {
-      tokenClientRef.current.requestAccessToken({ prompt: 'select_account' });
-    } catch {
-      setSubmitting(false);
-      setLocalError('Could not open the Google sign-in window.');
+    if (!nameEdited && val.includes('@')) {
+      const guessed = suggestName(val);
+      if (guessed) setDisplayName(guessed);
     }
   };
 
-  const handleSaveClientId = async (e: React.FormEvent) => {
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanHandle = username.trim().toLowerCase().replace(/[^a-z0-9_.]/g, '').slice(0, 20);
+  const resolvedHandle = cleanHandle || suggestHandle(cleanEmail, displayName);
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = clientIdInput.trim();
-    if (!cleaned || !cleaned.includes('.apps.googleusercontent.com')) {
-      setLocalError('Enter a valid Google OAuth Client ID ending in .apps.googleusercontent.com');
+    if (!emailValid) {
+      setLocalError('Please enter a valid Google email (e.g. you@gmail.com).');
       return;
     }
-    setLocalError(null);
-    setSavingClientId(true);
-    haptic([8, 30, 8]);
-    await api.saveGoogleClientId(cleaned);
-    setSavingClientId(false);
-    setShowSetup(false);
-  };
+    if (resolvedHandle.length > 0 && resolvedHandle.length < 3) {
+      setLocalError('Username must be at least 3 characters (or leave blank to auto-generate).');
+      return;
+    }
 
-  const currentOrigin =
-    typeof window !== 'undefined' ? window.location.origin : 'https://mobile-exam-room.vercel.app';
+    setLocalError(null);
+    setSubmitting(true);
+    haptic([8, 25, 8]);
+
+    const resolvedName =
+      displayName.trim() || suggestName(cleanEmail) || resolvedHandle || 'Player';
+
+    const acc = await api.loginWithGoogle({
+      email: cleanEmail,
+      name: resolvedName,
+      username: resolvedHandle || undefined,
+      avatar: currentAvatar,
+    });
+    setSubmitting(false);
+
+    if (acc) {
+      haptic([10, 35, 10]);
+      onClose();
+    } else if (api.error) {
+      setLocalError(api.error);
+    }
+  };
 
   return (
     <Sheet open={open} onClose={onClose} title="Sign in with Google">
-      <div className="space-y-4 pb-2">
+      <form onSubmit={handleSubmit} className="space-y-4 pb-2">
         <div className="flex items-start gap-3 rounded-2xl bg-[var(--surface)] p-3.5 shadow-[0_0_0_1px_var(--line)]">
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[rgba(215,255,63,0.16)] text-[var(--lime)]">
             <ShieldCheck size={20} />
           </span>
           <div className="min-w-0 flex-1">
-            <p className="font-display text-sm font-bold">Verified Google Account</p>
+            <p className="font-display text-sm font-bold">Instant Google Account</p>
             <p className="mt-0.5 text-xs leading-relaxed text-[var(--muted)]">
-              Claim your unique <strong className="text-[var(--paper)]">@username</strong>, add friends, and send live 1-tap room invites across phones.
+              Claim your unique <strong className="text-[var(--paper)]">@username</strong>, add
+              friends, and send live 1-tap room invites across phones.
             </p>
           </div>
         </div>
 
-        {activeClientId ? (
-          <div className="space-y-3 rounded-2xl bg-[var(--surface)] p-4 shadow-[0_0_0_1px_var(--line)]">
-            {/* 1. Custom Google Account Chooser Button */}
-            <button
-              type="button"
-              disabled={submitting || !gisReady}
-              onClick={handlePopupClick}
-              className="press flex h-13 w-full items-center justify-center gap-3 rounded-full bg-white px-5 text-[15px] font-semibold text-[#1f1f1f] shadow-md disabled:opacity-50"
-            >
-              {submitting ? (
-                <Loader2 size={18} className="animate-spin text-[#1f1f1f]" />
-              ) : (
-                <GoogleGIcon />
-              )}
-              <span>{submitting ? 'Verifying with Google…' : 'Continue with Google'}</span>
-            </button>
+        {/* Google Email */}
+        <div>
+          <label htmlFor="google-email" className="label flex items-center gap-1.5">
+            <Mail size={12} /> Google Email
+          </label>
+          <input
+            id="google-email"
+            type="email"
+            autoComplete="email"
+            inputMode="email"
+            required
+            className="field mt-1.5 font-medium"
+            placeholder="you@gmail.com"
+            value={email}
+            onChange={(e) => handleEmailChange(e.target.value)}
+          />
+        </div>
 
-            <div className="flex items-center gap-3 text-[11px] text-[var(--faint)]">
-              <span className="h-px flex-1 bg-[var(--line)]" />
-              <span>or one-tap widget</span>
-              <span className="h-px flex-1 bg-[var(--line)]" />
-            </div>
-
-            {/* 2. Official GIS Rendered Button */}
-            <div className="flex justify-center">
-              <div ref={gisBtnRef} className="min-h-[44px]" />
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setShowSetup((v) => !v)}
-              className="mx-auto block pt-1 text-[11px] font-semibold text-[var(--muted)] underline underline-offset-2 hover:text-[var(--paper)]"
-            >
-              {showSetup ? 'Hide OAuth Client ID settings' : 'Change Google OAuth Client ID'}
-            </button>
+        {/* Unique @username */}
+        <div>
+          <label htmlFor="google-username" className="label flex items-center gap-1.5">
+            <AtSign size={12} /> Unique @username
+          </label>
+          <div className="relative mt-1.5">
+            <AtSign
+              size={15}
+              className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--muted)]"
+            />
+            <input
+              id="google-username"
+              type="text"
+              autoComplete="username"
+              className="field code-cell pl-9 font-semibold"
+              placeholder={suggestHandle(cleanEmail, displayName) || 'your_username'}
+              value={username}
+              onChange={(e) => {
+                setUsernameEdited(true);
+                setUsername(
+                  e.target.value.toLowerCase().replace(/[^a-z0-9_.]/g, '').slice(0, 20)
+                );
+              }}
+            />
           </div>
-        ) : (
-          <div className="rounded-2xl bg-[var(--surface)] p-4 shadow-[0_0_0_1.5px_var(--amber)]">
-            <p className="flex items-center gap-2 font-display text-sm font-bold text-[var(--amber)]">
-              <KeyRound size={16} /> Connect Google OAuth Client ID
-            </p>
-            <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
-              To enable the official <strong className="text-[var(--paper)]">accounts.google.com</strong> sign-in popup, paste a Web Application OAuth Client ID from Google Cloud Console once (saved on the server for all phones).
-            </p>
-          </div>
-        )}
+          <p className="mt-1 text-[11px] text-[var(--muted)]">
+            Auto-suggested from your email or name if left blank.
+          </p>
+        </div>
 
-        {!activeClientId || showSetup ? (
-          <form
-            onSubmit={handleSaveClientId}
-            className="space-y-3 rounded-2xl bg-[var(--ink-2)] p-4 shadow-[0_0_0_1px_var(--line)]"
-          >
-            <div className="space-y-1.5 text-[11px] leading-relaxed text-[var(--muted)]">
-              <p className="font-semibold text-[var(--paper)]">Quick 1-minute Google Cloud setup:</p>
-              <p>
-                1. Open{' '}
-                <a
-                  href="https://console.cloud.google.com/apis/credentials"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 font-semibold text-[var(--lime)] underline"
-                >
-                  Google Cloud Credentials <ExternalLink size={11} />
-                </a>{' '}
-                → Create OAuth Client ID → <strong>Web application</strong>.
-              </p>
-              <div className="flex flex-wrap items-center gap-2">
-                <span>2. Add Authorized JavaScript Origin:</span>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    if (await copyText(currentOrigin)) {
-                      setCopiedOrigin(true);
-                      window.setTimeout(() => setCopiedOrigin(false), 1500);
-                    }
-                  }}
-                  className="chip !h-7 !min-h-0 !px-2.5 text-[11px]"
-                  data-active={copiedOrigin}
-                >
-                  {copiedOrigin ? <Check size={12} /> : <Copy size={12} />}
-                  <span className="code-cell">{currentOrigin}</span>
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label htmlFor="oauth-client-id" className="label">
-                Google OAuth Client ID
-              </label>
-              <input
-                id="oauth-client-id"
-                type="text"
-                className="field code-cell mt-1.5 text-xs"
-                placeholder="123456789-abc...apps.googleusercontent.com"
-                value={clientIdInput}
-                onChange={(e) => setClientIdInput(e.target.value)}
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={savingClientId || !clientIdInput.trim()}
-              className="btn-primary h-12 w-full text-sm"
-            >
-              {savingClientId ? <Loader2 size={16} className="animate-spin" /> : null}
-              Save &amp; Activate Google Sign-In
-            </button>
-          </form>
-        ) : null}
+        {/* Display Name */}
+        <div>
+          <label htmlFor="google-display-name" className="label flex items-center gap-1.5">
+            <User size={12} /> Display Name
+          </label>
+          <input
+            id="google-display-name"
+            type="text"
+            autoComplete="name"
+            maxLength={18}
+            className="field mt-1.5 font-semibold"
+            placeholder={suggestName(cleanEmail) || 'Your name'}
+            value={displayName}
+            onChange={(e) => {
+              setNameEdited(true);
+              setDisplayName(e.target.value);
+            }}
+          />
+        </div>
 
         {localError ? (
           <p className="text-xs font-semibold text-[var(--coral)]" role="alert">
@@ -330,10 +196,23 @@ export default function GoogleSignInSheet({
           </p>
         ) : null}
 
+        <button
+          type="submit"
+          disabled={submitting || !email.trim()}
+          className="press flex h-13 w-full items-center justify-center gap-3 rounded-full bg-white px-5 text-[15px] font-semibold text-[#1f1f1f] shadow-md disabled:opacity-50"
+        >
+          {submitting ? (
+            <Loader2 size={18} className="animate-spin text-[#1f1f1f]" />
+          ) : (
+            <GoogleGIcon />
+          )}
+          <span>{submitting ? 'Signing you in…' : 'Continue with Google Account'}</span>
+        </button>
+
         <button type="button" onClick={onClose} className="btn-ghost w-full text-sm">
           Continue as Guest
         </button>
-      </div>
+      </form>
     </Sheet>
   );
 }

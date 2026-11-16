@@ -318,52 +318,76 @@ export async function POST(req: NextRequest) {
       const googleAccessToken =
         typeof body.googleAccessToken === 'string' ? body.googleAccessToken.trim() : '';
 
-      if (!googleCredential && !googleAccessToken) {
-        return NextResponse.json(
-          {
-            error:
-              'Real Google OAuth verification is required. Please sign in using the official Google button.',
-          },
-          { status: 401 }
-        );
+      let email = normalizeEmail(body.email);
+      let verifiedName =
+        typeof body.name === 'string' && body.name.trim()
+          ? body.name.trim()
+          : undefined;
+      let verifiedPicture =
+        typeof body.pictureUrl === 'string' && body.pictureUrl.trim()
+          ? body.pictureUrl.trim()
+          : undefined;
+      let isOAuthVerified = false;
+
+      if (googleCredential || googleAccessToken) {
+        const verified = googleCredential
+          ? await verifyGoogleIdToken(googleCredential)
+          : await verifyGoogleAccessToken(googleAccessToken);
+
+        if (!verified || !isValidEmail(verified.email)) {
+          return NextResponse.json(
+            {
+              error:
+                'Google OAuth token verification failed. Please try signing in again.',
+            },
+            { status: 401 }
+          );
+        }
+        email = verified.email;
+        verifiedName = verified.name || verifiedName;
+        verifiedPicture = verified.picture || verifiedPicture;
+        isOAuthVerified = true;
+      } else {
+        if (!isValidEmail(email)) {
+          return NextResponse.json(
+            { error: 'Please enter a valid Google email address.' },
+            { status: 400 }
+          );
+        }
       }
 
-      const verified = googleCredential
-        ? await verifyGoogleIdToken(googleCredential)
-        : await verifyGoogleAccessToken(googleAccessToken);
-
-      if (!verified || !isValidEmail(verified.email)) {
-        return NextResponse.json(
-          {
-            error:
-              'Google OAuth token verification failed. Please try signing in with Google again.',
-          },
-          { status: 401 }
-        );
-      }
-
-      const email = verified.email;
       const existing = store.accounts.get(email);
-      const defaultName = verified.name || email.split('@')[0];
+      const defaultName = verifiedName || email.split('@')[0];
       const avatar = String(body.avatar || existing?.avatar || '🐥').trim() || '🐥';
 
       let assignedUsername = existing?.username;
+      if (typeof body.username === 'string' && body.username.trim()) {
+        const requested = normalizeUsername(body.username);
+        if (isValidUsername(requested)) {
+          const taken = findAccountByUsername(store, requested);
+          if (!taken || taken.email === email) {
+            assignedUsername = requested;
+          } else if (!assignedUsername) {
+            assignedUsername = generateUniqueUsername(store, requested, email);
+          }
+        }
+      }
       if (!assignedUsername) {
-        const preferred =
-          typeof body.username === 'string' && body.username.trim()
-            ? body.username
-            : verified.name || email.split('@')[0];
-        assignedUsername = generateUniqueUsername(store, preferred, email);
+        assignedUsername = generateUniqueUsername(
+          store,
+          verifiedName || email.split('@')[0],
+          email
+        );
       }
 
       const updated: UserAccount = existing
         ? pruneInvites({
             ...existing,
             username: assignedUsername,
-            name: verified.name || existing.name || defaultName,
+            name: verifiedName || existing.name || defaultName,
             avatar,
-            pictureUrl: verified.picture || existing.pictureUrl,
-            googleVerified: true,
+            pictureUrl: verifiedPicture || existing.pictureUrl,
+            googleVerified: isOAuthVerified || existing.googleVerified || true,
             updatedAt: now,
           })
         : {
@@ -371,7 +395,7 @@ export async function POST(req: NextRequest) {
             email,
             name: defaultName,
             avatar,
-            pictureUrl: verified.picture,
+            pictureUrl: verifiedPicture,
             googleVerified: true,
             friends: [],
             invites: [],

@@ -589,10 +589,13 @@ export function useRoom(): UseRoomReturn {
 
   const loginWithGoogle = useCallback(
     async (params: {
-      googleCredential?: string;
-      googleAccessToken?: string;
+      email?: string;
+      name?: string;
       username?: string;
       avatar?: string;
+      pictureUrl?: string;
+      googleCredential?: string;
+      googleAccessToken?: string;
     }): Promise<UserAccount | null> => {
       setIsLoading(true);
       setError(null);

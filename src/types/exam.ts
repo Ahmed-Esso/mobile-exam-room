@@ -242,10 +242,13 @@ export interface UseRoomReturn {
   }) => Promise<void>;
   saveGoogleClientId: (clientId: string) => Promise<void>;
   loginWithGoogle: (params: {
-    googleCredential?: string;
-    googleAccessToken?: string;
+    email?: string;
+    name?: string;
     username?: string;
     avatar?: string;
+    pictureUrl?: string;
+    googleCredential?: string;
+    googleAccessToken?: string;
   }) => Promise<UserAccount | null>;
   logoutAccount: () => void;
   updateUsername: (newUsername: string) => Promise<boolean>;
