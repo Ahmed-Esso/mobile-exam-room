@@ -6,18 +6,19 @@ import {
   Check,
   CheckCheck,
   Clock,
-  Eye,
   Flame,
   Hourglass,
   Infinity as InfinityIcon,
   LogOut,
   Trophy,
+  UserMinus,
   Users,
+  WifiOff,
   X,
   Zap,
 } from 'lucide-react';
-import type { UseRoomReturn } from '@/types/exam';
-import { LETTERS, Markdown, MemberTag, formatSeconds, haptic } from './ui';
+import type { ConnectionStatus, UseRoomReturn } from '@/types/exam';
+import { Avatar, LETTERS, Markdown, MemberTag, Sheet, formatSeconds, haptic } from './ui';
 import MemberStrip from './MemberStrip';
 import ContextualReactStrip from './ContextualReactStrip';
 import ReactionDock from './ReactionDock';
@@ -45,6 +46,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
   const [justBurst, setJustBurst] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [pressedNext, setPressedNext] = useState(false);
+  const [playersOpen, setPlayersOpen] = useState(false);
   const [expandedExpl, setExpandedExpl] = useState<Record<number, boolean>>({});
   const prevRevealedRef = useRef<boolean>(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -183,7 +185,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
     actionSlot = (
       <p className="px-1 text-[12px] leading-snug text-[var(--muted)]">
         {room.mode === 'race'
-          ? 'Tap an answer. First right answer gets the biggest bonus.'
+          ? 'Tap an answer. Reveals together when all lock in — fastest gets the bonus.'
           : 'Tap an answer to lock it in. Nothing reveals until everyone has answered.'}
       </p>
     );
@@ -193,6 +195,24 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
     <div className="flex min-h-0 flex-1 flex-col">
       {/* HUD */}
       <header className="pt-safe relative z-20 border-b border-[var(--line)] bg-[rgba(14,15,19,0.88)] px-4 pb-1.5 backdrop-blur-md">
+        {api.isLocalOffline || api.syncPendingCount > 0 ? (
+          <div
+            className="mb-1.5 flex items-center justify-center gap-1.5 rounded-xl px-2.5 py-1 text-[11px] font-semibold"
+            style={{
+              background: api.isLocalOffline
+                ? 'rgba(255, 106, 85, 0.16)'
+                : 'rgba(255, 176, 46, 0.16)',
+              color: api.isLocalOffline ? 'var(--coral)' : 'var(--amber)',
+            }}
+            role="status"
+          >
+            <WifiOff size={12} />
+            {api.isLocalOffline
+              ? 'Offline — answers queued, reconnecting…'
+              : `Syncing (${api.syncPendingCount})…`}
+          </div>
+        ) : null}
+
         <div className="flex items-center justify-between gap-2 pt-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <button
@@ -231,7 +251,21 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
             </span>
           </div>
 
-          {timerOn ? (
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                haptic(5);
+                setPlayersOpen(true);
+              }}
+              aria-label="View room players"
+              className="press flex h-8 shrink-0 items-center gap-1 rounded-full bg-[var(--surface-2)] px-2.5 text-[11px] font-semibold text-[var(--paper)] shadow-[0_0_0_1px_var(--line)]"
+            >
+              <Users size={12} />
+              <span className="tabular">{room.members.length}</span>
+            </button>
+
+            {timerOn ? (
             <div
               className="code-cell flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-bold tabular"
               style={{
@@ -244,14 +278,15 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
               <Clock size={13} className={timerLow ? 'animate-pulse' : 'text-[var(--muted)]'} />
               <span>{isAnswerRevealedToMe ? 'Done' : `${remainingSec}s`}</span>
             </div>
-          ) : (
-            <div
-              className="flex h-8 shrink-0 items-center gap-1 rounded-full bg-[var(--surface-2)] px-2.5 text-[11px] font-semibold text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]"
-              aria-label="No timer"
-            >
-              <InfinityIcon size={14} /> No timer
-            </div>
-          )}
+            ) : (
+              <div
+                className="flex h-8 shrink-0 items-center gap-1 rounded-full bg-[var(--surface-2)] px-2.5 text-[11px] font-semibold text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]"
+                aria-label="No timer"
+              >
+                <InfinityIcon size={14} /> No timer
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="mt-2.5 flex items-center gap-2.5">
@@ -270,7 +305,17 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
           </span>
         </div>
 
-        <MemberStrip room={room} leaderboard={leaderboard} meId={me?.id ?? null} revealedToMe={isAnswerRevealedToMe} />
+        <MemberStrip
+          room={room}
+          leaderboard={leaderboard}
+          meId={me?.id ?? null}
+          revealedToMe={isAnswerRevealedToMe}
+          memberConnectionStatus={api.memberConnectionStatus}
+          onOpenPlayers={() => {
+            haptic(5);
+            setPlayersOpen(true);
+          }}
+        />
       </header>
 
       {/* Arena */}
@@ -416,26 +461,6 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
             })}
           </section>
 
-          {/* Race: host can close the round for stragglers */}
-          {room.mode === 'race' && !room.isRevealed && isHost && answeredCount > 0 && waitingOnMembers.length > 0 ? (
-            <div className="flex items-center justify-between gap-2 rounded-2xl bg-[var(--surface)] px-4 py-2.5 text-xs shadow-[0_0_0_1px_var(--line)]">
-              <span className="flex min-w-0 items-center gap-2 text-[var(--muted)]">
-                <Zap size={14} className="shrink-0 text-[var(--amber)]" />
-                <span className="truncate">Still racing: {waitingOnMembers.map((m) => m.name).join(', ')}</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  haptic(8);
-                  void api.revealQuestion();
-                }}
-                className="press flex shrink-0 items-center gap-1 font-semibold text-[var(--amber)]"
-              >
-                <Eye size={13} /> Close round
-              </button>
-            </div>
-          ) : null}
-
           {/* Slim contextual reactions */}
           {isAnswerRevealedToMe ? <ContextualReactStrip api={api} room={room} /> : null}
         </div>
@@ -443,6 +468,74 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
 
       {/* Bottom: main action + collapsible reactions */}
       <ReactionDock api={api} leading={actionSlot} />
+
+      {/* Room Players & Host Kick Sheet */}
+      <Sheet open={playersOpen} onClose={() => setPlayersOpen(false)} title="Room players">
+        <ul className="space-y-2 pb-3">
+          {leaderboard.map((m) => {
+            const isMe = m.id === me?.id;
+            const ans = m.answers[qIdx];
+            const conn: ConnectionStatus =
+              api.memberConnectionStatus[m.id] ?? m.connectionStatus ?? 'online';
+            const connColor =
+              conn === 'offline'
+                ? 'var(--coral)'
+                : conn === 'weak'
+                ? 'var(--amber)'
+                : 'var(--lime)';
+            const connLabel =
+              conn === 'offline' ? 'Offline' : conn === 'weak' ? 'Weak signal' : 'Online';
+
+            return (
+              <li
+                key={m.id}
+                className="flex items-center justify-between gap-2.5 rounded-2xl bg-[var(--surface)] px-3 py-2.5 shadow-[0_0_0_1px_var(--line)]"
+              >
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <Avatar
+                    emoji={m.avatar}
+                    size={38}
+                    host={m.id === room.hostId}
+                    badge={m.statusBadge}
+                    ring={isMe ? 'me' : 'none'}
+                  />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-bold">
+                      {isMe ? `${m.name} (You)` : m.name}
+                    </p>
+                    <p className="flex items-center gap-1.5 text-[11px] text-[var(--muted)]">
+                      <span
+                        className="inline-block h-1.5 w-1.5 rounded-full"
+                        style={{ background: connColor }}
+                      />
+                      <span style={{ color: connColor }}>{connLabel}</span>
+                      <span>·</span>
+                      <span>{ans ? 'Locked in ✓' : 'Thinking…'}</span>
+                    </p>
+                  </div>
+                </div>
+
+                {isHost && !isMe ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      haptic(8);
+                      void api.removeMember(m.id);
+                    }}
+                    className="btn-secondary !min-h-[34px] shrink-0 !rounded-xl !px-2.5 text-xs text-[var(--coral)]"
+                  >
+                    <UserMinus size={13} /> Remove
+                  </button>
+                ) : (
+                  <span className="code-cell shrink-0 text-xs font-bold text-[var(--muted)] tabular">
+                    {m.score.toLocaleString()}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </Sheet>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AtSign,
   Check,
@@ -9,18 +9,24 @@ import {
   KeyRound,
   Loader2,
   Lock,
+  RotateCcw,
   SlidersHorizontal,
+  SmilePlus,
   Sparkles,
   User,
 } from 'lucide-react';
-import { AVATAR_OPTIONS, type UseRoomReturn } from '@/types/exam';
+import { AVATAR_OPTIONS, EMOJI_LIBRARY, type UseRoomReturn } from '@/types/exam';
 import AnimalAvatarArt, { animalLabel } from './AnimalAvatarArt';
 import {
   ANIMAL_NAMES,
+  CUSTOM_REACTIONS_EVENT,
+  DEFAULT_CUSTOM_REACTIONS,
   DEFAULT_LAYOUT,
   autoName,
+  readCustomReactions,
   readLayout,
   readProfile,
+  saveCustomReactions,
   saveLayout,
   type LayoutDensity,
   type LayoutPreferences,
@@ -53,12 +59,26 @@ export default function ProfileEditSheet({
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
   const [layout, setLayout] = useState<LayoutPreferences>(DEFAULT_LAYOUT);
+  const [customReactions, setCustomReactions] = useState<string[]>(DEFAULT_CUSTOM_REACTIONS);
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    if (!open) return;
+    const onCustom = (e: Event) => {
+      const detail = (e as CustomEvent<string[]>).detail;
+      if (Array.isArray(detail) && detail.length > 0) setCustomReactions(detail);
+    };
+    window.addEventListener(CUSTOM_REACTIONS_EVENT, onCustom);
+    return () => window.removeEventListener(CUSTOM_REACTIONS_EVENT, onCustom);
+  }, []);
+
+  useEffect(() => {
+    const justOpened = open && !wasOpenRef.current;
+    wasOpenRef.current = open;
+    if (!justOpened) return;
     setSavedNotice(false);
     setShowKey(false);
     setLayout(readLayout());
+    setCustomReactions(readCustomReactions());
     const localProf = readProfile();
     const resolvedAvatar =
       initialAvatar || me?.avatar || account?.avatar || localProf?.avatar || AVATAR_OPTIONS[0];
@@ -360,6 +380,58 @@ export default function ProfileEditSheet({
                 })}
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Reaction Bar Emojis */}
+        <div className="rounded-2xl bg-[var(--surface)] p-3.5 shadow-[0_0_0_1px_var(--line)]">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-sm font-bold text-[var(--paper)]">
+              <SmilePlus size={15} className="text-[var(--amber)]" />
+              Reaction Bar Emojis
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                haptic(5);
+                setCustomReactions(saveCustomReactions(DEFAULT_CUSTOM_REACTIONS));
+              }}
+              className="chip !h-7 !min-h-0 !px-2.5 text-[11px]"
+            >
+              <RotateCcw size={11} /> Reset
+            </button>
+          </div>
+          <div className="mt-2.5 grid grid-cols-6 gap-1.5">
+            {EMOJI_LIBRARY.map((emoji) => {
+              const active = customReactions.includes(emoji);
+              return (
+                <button
+                  key={emoji}
+                  type="button"
+                  onClick={() => {
+                    haptic(5);
+                    if (active && customReactions.length <= 1) return;
+                    const next = active
+                      ? customReactions.filter((r) => r !== emoji)
+                      : [...customReactions, emoji];
+                    setCustomReactions(saveCustomReactions(next));
+                  }}
+                  aria-pressed={active}
+                  className="press relative flex h-9 items-center justify-center rounded-xl text-lg"
+                  style={{
+                    background: active ? 'var(--surface-3)' : 'var(--ink-2)',
+                    boxShadow: active ? '0 0 0 1.5px var(--lime)' : '0 0 0 1px var(--line)',
+                  }}
+                >
+                  {emoji}
+                  {active ? (
+                    <span className="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[var(--lime)] text-[var(--ink)]">
+                      <Check size={9} strokeWidth={3.5} />
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
           </div>
         </div>
 

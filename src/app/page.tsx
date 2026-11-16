@@ -1,13 +1,15 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import dynamic from 'next/dynamic';
 import { AlertCircle, ArrowRight, X } from 'lucide-react';
 import { useRoom } from '@/hooks/useRoom';
 import LobbyView from '@/components/LobbyView';
-import ExamArenaView from '@/components/ExamArenaView';
-import ResultsView from '@/components/ResultsView';
 import EmojiReactionOverlay from '@/components/EmojiReactionOverlay';
 import PullToRefresh from '@/components/PullToRefresh';
+
+const ExamArenaView = dynamic(() => import('@/components/ExamArenaView'), { ssr: false });
+const ResultsView = dynamic(() => import('@/components/ResultsView'), { ssr: false });
 import { AVATAR_OPTIONS, type RoomInvite } from '@/types/exam';
 import {
   DEFAULT_LAYOUT,
@@ -134,7 +136,10 @@ export default function HomePage() {
                 <span className="flex-1 leading-snug">{error}</span>
                 <button
                   type="button"
-                  onClick={clearError}
+                  onClick={() => {
+                    clearError();
+                    if (api.wasKicked) api.clearKickedNotice();
+                  }}
                   className="press rounded-full p-1 text-[var(--muted)] hover:text-[var(--paper)]"
                   aria-label="Dismiss error"
                 >

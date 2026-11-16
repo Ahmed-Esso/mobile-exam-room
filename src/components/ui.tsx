@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, type ReactNode } from 'react';
+import { memo, useEffect, useRef, type ReactNode } from 'react';
 import katex from 'katex';
 import { Crown, X } from 'lucide-react';
 import type { MemberAnswerTag } from '@/types/exam';
@@ -136,13 +136,26 @@ export function MemberTag({
 /* Markdown + KaTeX LaTeX renderer                                             */
 /* -------------------------------------------------------------------------- */
 
+const KATEX_CACHE = new Map<string, string>();
+
 function renderKatexHtml(latex: string, displayMode: boolean): string {
+  const trimmed = latex.trim();
+  const key = `${displayMode ? 'D' : 'I'}:${trimmed}`;
+  const cached = KATEX_CACHE.get(key);
+  if (cached !== undefined) return cached;
+
   try {
-    return katex.renderToString(latex.trim(), {
+    const html = katex.renderToString(trimmed, {
       displayMode,
       throwOnError: false,
       strict: 'ignore',
     });
+    if (KATEX_CACHE.size > 600) {
+      const firstKey = KATEX_CACHE.keys().next().value;
+      if (firstKey !== undefined) KATEX_CACHE.delete(firstKey);
+    }
+    KATEX_CACHE.set(key, html);
+    return html;
   } catch {
     return latex;
   }
@@ -221,7 +234,7 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
   });
 }
 
-export function Markdown({
+export const Markdown = memo(function Markdown({
   source,
   className = '',
   inline = false,
@@ -330,7 +343,7 @@ export function Markdown({
       {blocks}
     </div>
   );
-}
+});
 
 /* -------------------------------------------------------------------------- */
 /* Bottom sheet                                                                */

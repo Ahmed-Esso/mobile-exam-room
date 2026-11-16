@@ -126,3 +126,52 @@ export function saveLayout(prefs: LayoutPreferences) {
     /* ignore */
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Customizable reaction bar emojis                                           */
+/* -------------------------------------------------------------------------- */
+
+export const CUSTOM_REACTIONS_KEY = 'exam_room_custom_reactions_v1';
+export const CUSTOM_REACTIONS_EVENT = 'exam-room-custom-reactions-updated';
+export const DEFAULT_CUSTOM_REACTIONS: string[] = [
+  '🐥',
+  '😜',
+  '😂',
+  '🔥',
+  '👏',
+  '❤️',
+  '🎉',
+  '🤔',
+  '💀',
+  '😭',
+  '🫡',
+];
+
+export function readCustomReactions(): string[] {
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_REACTIONS_KEY);
+    if (!raw) return DEFAULT_CUSTOM_REACTIONS;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return DEFAULT_CUSTOM_REACTIONS;
+    const cleaned = parsed
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => item.length > 0 && item.length <= 12);
+    return cleaned.length > 0 ? cleaned.slice(0, 14) : DEFAULT_CUSTOM_REACTIONS;
+  } catch {
+    return DEFAULT_CUSTOM_REACTIONS;
+  }
+}
+
+export function saveCustomReactions(emojis: string[]) {
+  const cleaned = Array.from(
+    new Set(emojis.map((e) => e.trim()).filter((e) => e.length > 0 && e.length <= 12))
+  ).slice(0, 14);
+  const final = cleaned.length > 0 ? cleaned : DEFAULT_CUSTOM_REACTIONS;
+  try {
+    window.localStorage.setItem(CUSTOM_REACTIONS_KEY, JSON.stringify(final));
+    window.dispatchEvent(new CustomEvent<string[]>(CUSTOM_REACTIONS_EVENT, { detail: final }));
+  } catch {
+    /* ignore */
+  }
+  return final;
+}

@@ -1,8 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import {
   AtSign,
+  Bell,
   Check,
   ClipboardPaste,
   Copy,
@@ -19,10 +21,12 @@ import {
 import { AVATAR_OPTIONS, type PublicDirectoryUser, type UseRoomReturn } from '@/types/exam';
 import { Avatar, copyText, haptic } from './ui';
 import RoomLobby from './RoomLobby';
-import GoogleSignInSheet from './GoogleSignInSheet';
-import ProfileEditSheet from './ProfileEditSheet';
 import { InstallAppButton } from './InstallAppSheet';
 import { autoName, extractRoomCode, readProfile, saveProfile } from './profile';
+
+const GoogleSignInSheet = dynamic(() => import('./GoogleSignInSheet'), { ssr: false });
+const ProfileEditSheet = dynamic(() => import('./ProfileEditSheet'), { ssr: false });
+const NotificationsSheet = dynamic(() => import('./NotificationsSheet'), { ssr: false });
 
 export default function LobbyView({
   api,
@@ -52,6 +56,7 @@ function JoinScreen({
   const [codeFocused, setCodeFocused] = useState(false);
   const [signInOpen, setSignInOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
   const [copiedHandle, setCopiedHandle] = useState(false);
 
   const [addFriendOpen, setAddFriendOpen] = useState(false);
@@ -186,6 +191,24 @@ function JoinScreen({
 
           <div className="flex items-center gap-1.5">
             <InstallAppButton compact />
+            {account ? (
+              <button
+                type="button"
+                onClick={() => {
+                  haptic(5);
+                  setNotifOpen(true);
+                }}
+                aria-label="Notifications and room invites"
+                className="press relative flex h-9 w-9 items-center justify-center rounded-full bg-[var(--surface-2)] text-[var(--paper)] shadow-[0_0_0_1px_var(--line)]"
+              >
+                <Bell size={15} />
+                {(account.invites?.length ?? 0) > 0 ? (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[var(--lime)] px-1 text-[10px] font-extrabold text-[var(--ink)] tabular">
+                    {account.invites.length}
+                  </span>
+                ) : null}
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => {
@@ -577,6 +600,11 @@ function JoinScreen({
         onClose={() => setSignInOpen(false)}
         api={api}
         currentAvatar={avatar}
+      />
+      <NotificationsSheet
+        open={notifOpen}
+        onClose={() => setNotifOpen(false)}
+        api={api}
       />
       <ProfileEditSheet
         open={profileOpen}

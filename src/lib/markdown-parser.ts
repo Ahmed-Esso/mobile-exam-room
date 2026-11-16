@@ -69,7 +69,7 @@ function letterToIndex(letter: string): number {
 }
 
 /**
- * Deterministic, flexible Markdown Question Parser with full LaTeX ($...$, $$...$$, \(...\), \[...\]),
+ * Deterministic, unlimited-scale Markdown Question Parser with full LaTeX ($...$, $$...$$, \(...\), \[...\]),
  * NotebookLM-style per-option explanations (- **Explain A:** ...), and bilingual (English + Arabic) support.
  */
 export function parseMarkdownQuestions(markdown: string): ParseQuestionsResult {
@@ -110,11 +110,25 @@ function splitIntoQuestionBlocks(markdown: string): string[] {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (line.trim().startsWith('```')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('```')) {
       inCodeFence = !inCodeFence;
     }
-    if (!inCodeFence && i === 0 && /^#\s+[^#]/.test(line.trim())) {
-      continue;
+    // Only strip line 0 if it is a standalone non-question H1 title (e.g. `# Physics Chapter 3`),
+    // NEVER if it looks like `# 1. Question`, `# Q1`, `# س1`, or is immediately followed by options.
+    if (
+      !inCodeFence &&
+      i === 0 &&
+      /^#\s+[^#]/.test(trimmed) &&
+      !/^#\s+(?:Q(?:uestion)?\s*\d*|س(?:ؤال)?\s*\d*|\d+[.:)])/i.test(trimmed)
+    ) {
+      const nextNonEmpty = lines
+        .slice(1, 5)
+        .map((l) => l.trim())
+        .find((l) => l.length > 0);
+      if (nextNonEmpty && !isOptionLine(nextNonEmpty)) {
+        continue;
+      }
     }
     cleanedLines.push(line);
   }
@@ -141,7 +155,11 @@ function splitByOutsideCodeAndMath(text: string, delimiterRegex: RegExp): string
     if (trimmed.startsWith('```')) {
       inCode = !inCode;
     }
-    if (!inCode && trimmed.startsWith('$$') && (trimmed === '$$' || !trimmed.slice(2).includes('$$'))) {
+    if (
+      !inCode &&
+      trimmed.startsWith('$$') &&
+      (trimmed === '$$' || !trimmed.slice(2).includes('$$'))
+    ) {
       inMathBlock = !inMathBlock;
     }
     if (!inCode && !inMathBlock && delimiterRegex.test(trimmed)) {
@@ -164,21 +182,36 @@ function splitByQuestionHeaders(text: string): string[] {
   const blocks: string[] = [];
   let current: string[] = [];
   let inCode = false;
+  let inMathBlock = false;
 
+  // Matches `# 1.`, `## 1.`, `##### Q1:`, `**1. Question**`, `**Q1:**`, `Q1.`, `1. Question`, `س1:`
   const headerPattern =
-    /^(?:#{2,4}\s*(?:Q(?:uestion)?\s*\d*[:.)]?\s*|س(?:ؤال)?\s*\d*[:.)]?\s*|\d+[:.)]\s*)?|(?:Q(?:uestion)?\s*\d+[:.)]\s*)|(?:س(?:ؤال)?\s*\d+[:.)]\s*)|\*\*(?:Q(?:uestion)?\s*\d+|س(?:ؤال)?\s*\d+|\d+)[.:)]\*\*|\d+[.)]\s+\S+)/i;
+    /^(?:#{1,6}\s*(?:Q(?:uestion)?\s*\d*[:.)]?\s*|س(?:ؤال)?\s*\d*[:.)]?\s*|\d+[:.)]\s*)?|(?:Q(?:uestion)?\s*\d+[:.)]\s*)|(?:س(?:ؤال)?\s*\d+[:.)]\s*)|\*\*(?:Q(?:uestion)?\s*\d+|س(?:ؤال)?\s*\d+|\d+)[.:)]\*\*|\*\*(?:Q(?:uestion)?\s*\d+|س(?:ؤال)?\s*\d+|\d+)[.:)]\s+|\d+[.)]\s+\S+)/i;
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const trimmed = line.trim();
     if (trimmed.startsWith('```')) {
       inCode = !inCode;
     }
+    if (
+      !inCode &&
+      trimmed.startsWith('$$') &&
+      (trimmed === '$$' || !trimmed.slice(2).includes('$$'))
+    ) {
+      inMathBlock = !inMathBlock;
+    }
+
+    const looksLikeOption =
+      /^[-*+]\s/.test(trimmed) ||
+      /^(?:\*\*)?(?:[A-Fa-f]|[أابجده])[.)](?:\*\*)?\s+/.test(trimmed) ||
+      /^\((?:[A-Fa-f]|[أابجده])\)\s+/.test(trimmed);
 
     const isHeader =
       !inCode &&
+      !inMathBlock &&
       headerPattern.test(trimmed) &&
-      !/^[-*]\s/.test(trimmed) &&
-      !/^[A-Fa-fأابجده][.)]\s/.test(trimmed);
+      !looksLikeOption;
 
     if (isHeader && current.length > 0 && hasOptionLikeLines(current.join('\n'))) {
       blocks.push(current.join('\n').trim());
@@ -210,7 +243,8 @@ function isOptionLine(trimmed: string): boolean {
   return (
     /^[-*+]\s*\[[ xX✓✔]\]\s+/.test(trimmed) ||
     /^(?:[-*+]\s*)?(?:\*\*)?(?:[A-Fa-f]|[أابجده])[\.\)\-](?:\*\*)?\s+/.test(trimmed) ||
-    /^(?:[-*+]\s*)?\((?:[A-Fa-f]|[أابجده])\)\s+/.test(trimmed)
+    /^(?:[-*+]\s*)?\((?:[A-Fa-f]|[أابجده])\)\s+/.test(trimmed) ||
+    /^(?:[-*+]\s*)?(?:\(\d\)|[1-6]\))\s+/.test(trimmed)
   );
 }
 
@@ -272,13 +306,16 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       continue;
     }
 
-    // Check per-option explanation lines:
-    // e.g. `- **Explain A:** ...`, `**Explanation B:** ...`, `- **شرح أ:** ...`
+    // Per-option explanation lines:
+    // `- **Explain A:** ...`, `**Explanation B:** ...`, `- **شرح أ:** ...`
     const perOptionMatch = trimmed.match(
-      /^(?:[-*+>]\s*)?(?:\*\*)?(?:Explain|Explanation|Why|Option|شرح|تفسير)\s+([A-Fa-fأابجده])(?:\*\*)?\s*[:\-](?:\*\*)?\s*(.+)$/i
+      /^(?:[-*+>]\s*)?(?:\*\*)?(?:Explain|Explanation|Why|Option|شرح|تفسير)\s+([A-Fa-fأابجده1-6])(?:\*\*)?\s*[:\-](?:\*\*)?\s*(.+)$/i
     );
     if (perOptionMatch) {
-      const optIdx = letterToIndex(perOptionMatch[1]);
+      const keyChar = perOptionMatch[1];
+      const optIdx = /^[1-6]$/.test(keyChar)
+        ? Number(keyChar) - 1
+        : letterToIndex(keyChar);
       if (optIdx >= 0) {
         optionExplanationsMap.set(optIdx, perOptionMatch[2].trim());
         inExplanation = false;
@@ -286,7 +323,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       }
     }
 
-    // Check sub-bullet or inline `> Explain:` directly beneath an option before Answer/Explanation
+    // Inline `> Explain:` directly beneath an option before Answer/Explanation
     if (seenFirstOption && !inExplanation && lastOptionIdx >= 0 && explicitAnswerRaw === null) {
       const inlineOptExplain = trimmed.match(
         /^(?:[-*+>]\s*)?(?:\*\*)?(?:Explain|Why|Rationale|شرح|تفسير)(?:\*\*)?\s*[:\-](?:\*\*)?\s*(.+)$/i
@@ -297,7 +334,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       }
     }
 
-    // Check explicit Answer line (English + Arabic labels)
+    // Explicit Answer line (English + Arabic labels)
     const answerMatch = trimmed.match(
       /^(?:>\s*)?(?:\*\*)?(?:Correct\s+Answer|Answer|Correct|Ans|الإجابة\s+الصحيحة|الاجابة\s+الصحيحة|الإجابة|الاجابة|الجواب)(?:\*\*)?\s*[:\-](?:\*\*)?\s*(?:\*\*)?(.+?)(?:\*\*)?$/i
     );
@@ -307,7 +344,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       continue;
     }
 
-    // Check Explanation start line (English + Arabic labels)
+    // Explanation start line (English + Arabic labels)
     const explanationMatch = trimmed.match(
       /^(?:>\s*)?(?:💡\s*)?(?:\*\*)?(?:Explanation|Why|Rationale|Note|التفسير|الشرح|التوضيح|السبب)(?:\*\*)?\s*[:\-](?:\*\*)?\s*(.*)$/i
     );
@@ -324,7 +361,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       continue;
     }
 
-    // Check Checkbox Option: `- [x] Option text` or `- [ ] Option text`
+    // Checkbox Option: `- [x] Option text` or `- [ ] Option text`
     const checkboxMatch = trimmed.match(/^[-*+]\s*\[([ xX✓✔])\]\s+(.+)$/);
     if (checkboxMatch) {
       seenFirstOption = true;
@@ -339,7 +376,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       continue;
     }
 
-    // Check Lettered Option: `A) text`, `- A) text`, `**A.** text`, `(A) text`, `أ) text`
+    // Lettered Option: `A) text`, `- a) text`, `**A.** text`, `(A) text`, `أ) text`
     const letterMatch = trimmed.match(
       /^(?:[-*+]\s*)?(?:\*\*)?(?:\(([A-Fa-fأابجده])\)|([A-Fa-fأابجده])[.)\-])(?:\*\*)?\s+(.+)$/
     );
@@ -357,7 +394,27 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       continue;
     }
 
-    // Check blockquote after options as implicit explanation
+    // Numeric sub-options like `1) text` or `(1) text` ONLY once prompt already has content
+    if (promptLines.length > 0) {
+      const numericOptMatch = trimmed.match(
+        /^(?:[-*+]\s*)?(?:\((\d)\)|(\d)\))\s+(.+)$/
+      );
+      if (numericOptMatch) {
+        seenFirstOption = true;
+        let optText = numericOptMatch[3].trim();
+        if (/(?:\(correct\)|\[correct\]|\[x\]|\(صحيح\)|✅|✓|✔)\s*$/i.test(optText)) {
+          detectedCorrectIndex = options.length;
+          optText = optText
+            .replace(/(?:\(correct\)|\[correct\]|\[x\]|\(صحيح\)|✅|✓|✔)\s*$/i, '')
+            .trim();
+        }
+        lastOptionIdx = options.length;
+        options.push(optText);
+        continue;
+      }
+    }
+
+    // Blockquote after options as implicit explanation
     if (seenFirstOption && trimmed.startsWith('>')) {
       inExplanation = true;
       explanationLines.push(trimmed.replace(/^>\s*/, ''));
@@ -369,6 +426,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
         const cleanedHeader = trimmed
           .replace(/^#{1,6}\s*/, '')
           .replace(/^(?:\*\*)?(?:Q(?:uestion)?\s*\d+|س(?:ؤال)?\s*\d+|\d+)[.:)](?:\*\*)?\s*/i, '')
+          .replace(/^\*\*(.+)\*\*$/, '$1')
           .trim();
         if (cleanedHeader) {
           promptLines.push(cleanedHeader);
@@ -387,6 +445,7 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
     const cleanAns = explicitAnswerRaw.replace(/^[\[(]|[\])]$/g, '').trim();
     const letterAnsMatch = cleanAns.match(/^([A-Fa-f])(?:[.)\s]|$)/);
     const arabicAnsMatch = cleanAns.match(/^([أابجده])(?:[.)\s]|$)/);
+    const numericAnsMatch = cleanAns.match(/^([1-6])(?:[.)\s]|$)/);
     if (letterAnsMatch) {
       const idx = letterAnsMatch[1].toUpperCase().charCodeAt(0) - 65;
       if (idx >= 0 && idx < options.length) {
@@ -394,6 +453,11 @@ function parseSingleBlock(rawBlock: string, index: number): Question | null {
       }
     } else if (arabicAnsMatch && ARABIC_LETTER_MAP[arabicAnsMatch[1]] !== undefined) {
       const idx = ARABIC_LETTER_MAP[arabicAnsMatch[1]];
+      if (idx >= 0 && idx < options.length) {
+        detectedCorrectIndex = idx;
+      }
+    } else if (numericAnsMatch) {
+      const idx = Number(numericAnsMatch[1]) - 1;
       if (idx >= 0 && idx < options.length) {
         detectedCorrectIndex = idx;
       }

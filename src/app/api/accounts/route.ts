@@ -706,6 +706,7 @@ export async function POST(req: NextRequest) {
       };
 
       const recipient = findAccountByUsername(store, toUsername);
+      let inboxInvites: RoomInvite[] = [invite];
       if (recipient) {
         const updatedRecipient = pruneInvites({
           ...recipient,
@@ -715,17 +716,18 @@ export async function POST(req: NextRequest) {
           ],
           updatedAt: now,
         });
+        inboxInvites = updatedRecipient.invites;
         store.accounts.set(recipient.email, updatedRecipient);
         saveDiskData(store);
       }
 
-      return NextResponse.json({ invite, sent: true });
+      return NextResponse.json({ invite, inboxInvites, sent: true });
     }
 
     if (action === 'dismissInvite') {
       const email = normalizeEmail(body.email);
       const inviteId = String(body.inviteId || '');
-      const acc = store.accounts.get(email);
+      const acc = store.accounts.get(email) || (body.account as UserAccount | undefined);
       if (!acc) {
         return NextResponse.json({ error: 'Account not found' }, { status: 404 });
       }

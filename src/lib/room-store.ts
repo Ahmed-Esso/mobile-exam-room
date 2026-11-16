@@ -20,6 +20,26 @@ const globalForRooms = globalThis as unknown as {
 
 const TMP_STORE_PATH = '/tmp/exam-rooms-v2.json';
 
+/**
+ * Fast deterministic FNV-1a digest of a Question[] array so live sync polls & deltas
+ * can omit heavy `questions[]` payloads when both sides already share the same digest.
+ */
+export function computeQuestionsDigest(questions: Question[]): string {
+  if (!Array.isArray(questions) || questions.length === 0) {
+    return '0-0';
+  }
+  let hash = 2166136261;
+  for (let i = 0; i < questions.length; i++) {
+    const q = questions[i];
+    const str = `${q.id || ''}|${q.prompt}|${q.correctIndex}|${q.options.join('^')}`;
+    for (let j = 0; j < str.length; j++) {
+      hash ^= str.charCodeAt(j);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  return `${questions.length}-${(hash >>> 0).toString(36)}`;
+}
+
 function loadDiskRooms(): Record<string, RoomState> {
   if (typeof window !== 'undefined') return {};
   try {
@@ -127,10 +147,9 @@ const STATUS_RANK: Record<RoomStatus, number> = {
 
 /**
  * Deterministic CRDT-style room state merger.
- * Handles:
  * - Mutual Lobby Ready state (`isReady`)
  * - Mutual Next Question gate (`readyForNextQuestionIndex`) with automatic advance when all members press Next
- * - Strict Wait-mode hold (never reveals until all members have answered)
+ * - Collective anti-spoiler reveal for BOTH 'wait' AND 'race' modes (never reveals until all members have answered)
  */
 export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
   if (!a) return b;
@@ -164,6 +183,10 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
     (b.questions.length > 0 && qTimeB > qTimeA);
   const mergedQuestions = useQuestionsB ? b.questions : a.questions;
   const mergedQuestionsUpdatedAt = Math.max(qTimeA, qTimeB);
+  const mergedQuestionsDigest =
+    mergedQuestions.length > 0
+      ? computeQuestionsDigest(mergedQuestions)
+      : primary.questionsDigest || a.questionsDigest || b.questionsDigest || '0-0';
 
   const hostFromA = a.members.find((m) => m.isHost)?.id;
   const hostFromB = b.members.find((m) => m.isHost)?.id;
@@ -211,12 +234,11 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
       }
 
       const newerMeta = mB.lastSeenAt >= mA.lastSeenAt ? mB : mA;
-      const mergedReady =
-        sameSession
-          ? Boolean(newerMeta.isReady)
-          : sessionB > sessionA
-          ? bReady
-          : Boolean(mA.isReady);
+      const mergedReady = sameSession
+        ? Boolean(newerMeta.isReady)
+        : sessionB > sessionA
+        ? bReady
+        : Boolean(mA.isReady);
 
       const mergedNextIdx = sameSession
         ? Math.max(mA.readyForNextQuestionIndex ?? -1, bNextIdx)
@@ -229,6 +251,7 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
         id: mB.id,
         name: newerMeta.name || mA.name || mB.name,
         avatar: newerMeta.avatar || mA.avatar || mB.avatar,
+        username: newerMeta.username || mA.username || mB.username,
         email: newerMeta.email || mA.email || mB.email,
         pictureUrl: newerMeta.pictureUrl || mA.pictureUrl || mB.pictureUrl,
         isHost: mA.isHost || mB.isHost || mB.id === mergedHostId,
@@ -281,8 +304,7 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
     );
   }
 
-  // Mutual Next Question Gate check inside CRDT merge:
-  // If active and EVERY member in mergedMembers has readyForNextQuestionIndex >= mergedQuestionIndex, advance!
+  // Mutual Next Question Gate check inside CRDT merge
   if (
     mergedStatus === 'active' &&
     mergedMembers.length > 0 &&
@@ -317,17 +339,13 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
     mergedMembers.length > 0 &&
     mergedMembers.every((m) => m.answers[mergedQuestionIndex] !== undefined);
 
+  // Collective anti-spoiler reveal for BOTH Wait and Race modes:
+  // Neither mode reveals answers or peer tags until every member has answered (or exam is finished).
   let mergedIsRevealed = false;
   if (mergedStatus === 'finished') {
     mergedIsRevealed = true;
   } else if (mergedStatus === 'active') {
-    if (primary.mode === 'wait') {
-      // Strictly never force-reveal in Wait mode: reveal ONLY when every member has answered
-      mergedIsRevealed = allAnswered;
-    } else {
-      mergedIsRevealed =
-        mergedForceRevealed === mergedQuestionIndex || allAnswered;
-    }
+    mergedIsRevealed = allAnswered;
   }
 
   return {
@@ -347,6 +365,7 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
     examSessionId: latestSessionId,
     forceRevealedQuestionIndex: mergedForceRevealed,
     questionsUpdatedAt: mergedQuestionsUpdatedAt,
+    questionsDigest: mergedQuestionsDigest,
     kickedMemberIds: Array.from(kickedSet),
     isRevealed: mergedIsRevealed,
     questions: mergedQuestions,
@@ -376,7 +395,7 @@ function generateRoomCode(): string {
 function pruneOldRooms() {
   const store = getStore();
   const now = Date.now();
-  const maxAgeMs = 1000 * 60 * 60 * 6; // 6 hours
+  const maxAgeMs = 1000 * 60 * 60 * 6;
   let changed = false;
   for (const [code, room] of Array.from(store.rooms.entries())) {
     if (now - room.updatedAt > maxAgeMs) {
@@ -389,7 +408,7 @@ function pruneOldRooms() {
   }
 }
 
-function computePoints(
+export function computePoints(
   room: RoomState,
   member: Member,
   isCorrect: boolean,
@@ -489,10 +508,8 @@ function recordMemberAnswerInternal(
     room.members.length > 0 &&
     room.members.every((m) => m.answers[qIdx] !== undefined);
 
-  room.isRevealed =
-    room.mode === 'wait'
-      ? allAnswered
-      : room.forceRevealedQuestionIndex === qIdx || allAnswered;
+  // Collective anti-spoiler reveal for both Wait and Race modes
+  room.isRevealed = allAnswered;
   room.version += 1;
   room.updatedAt = Date.now();
   return true;
@@ -575,13 +592,14 @@ export function createRoomInStore(params: {
     title: params.title?.trim() || 'Live Exam Room',
     status: 'lobby',
     mode: params.mode || 'wait',
-    timePerQuestion: 0, // Timer OFF by default
+    timePerQuestion: 0,
     hostId: hostMember.id,
     currentQuestionIndex: 0,
     questionStartedAt: now,
     examSessionId: now,
     forceRevealedQuestionIndex: -1,
     questionsUpdatedAt: 0,
+    questionsDigest: '0-0',
     kickedMemberIds: [],
     isRevealed: false,
     questions: [],
@@ -652,6 +670,7 @@ export function joinRoomInStore(params: {
       examSessionId: 0,
       forceRevealedQuestionIndex: -1,
       questionsUpdatedAt: 0,
+      questionsDigest: '0-0',
       kickedMemberIds: [],
       isRevealed: false,
       questions: [],
@@ -709,10 +728,7 @@ export function joinRoomInStore(params: {
     const allAnswered =
       room.members.length > 0 &&
       room.members.every((m) => m.answers[qIdx] !== undefined);
-    room.isRevealed =
-      room.mode === 'wait'
-        ? allAnswered
-        : room.forceRevealedQuestionIndex === qIdx || allAnswered;
+    room.isRevealed = allAnswered;
   }
 
   room.version += 1;
@@ -757,6 +773,16 @@ export function mutateRoomInStore(
   if (payload.fallbackRoom && typeof payload.fallbackRoom === 'object') {
     const clientRoom = payload.fallbackRoom as RoomState;
     if (clientRoom.code === cleanCode && Array.isArray(clientRoom.members)) {
+      // Preserve server questions if client omitted heavy questions[] with matching digest
+      if (
+        room &&
+        clientRoom.questions.length === 0 &&
+        room.questions.length > 0 &&
+        (!clientRoom.questionsDigest ||
+          clientRoom.questionsDigest === room.questionsDigest)
+      ) {
+        clientRoom.questions = room.questions;
+      }
       room = room ? mergeRoomStates(room, clientRoom) : clientRoom;
       store.rooms.set(cleanCode, room);
     }
@@ -786,7 +812,6 @@ export function mutateRoomInStore(
         actingMember.isReady = explicitReady;
         actingMember.lastSeenAt = now;
 
-        // If 2+ members are in the room, questions are loaded, and ALL members are now Ready, auto-start!
         const allReady =
           room.members.length >= 2 &&
           room.questions.length > 0 &&
@@ -813,8 +838,8 @@ export function mutateRoomInStore(
           actingMember.username = payload.username.trim().toLowerCase();
         }
         actingMember.lastSeenAt = now;
-        room.version += 1;
-        room.updatedAt = now;
+        room.version = (room.version || 1) + 2;
+        room.updatedAt = Math.max(now + 1000, (room.updatedAt || now) + 1);
       }
       break;
     }
@@ -843,6 +868,7 @@ export function mutateRoomInStore(
       if (Array.isArray(questions)) {
         room.questions = questions;
         room.questionsUpdatedAt = now;
+        room.questionsDigest = computeQuestionsDigest(questions);
         if (typeof payload.title === 'string' && payload.title.trim()) {
           room.title = payload.title.trim();
         }
@@ -863,7 +889,6 @@ export function mutateRoomInStore(
         room.members.length > 0 &&
         room.members.every((m) => Boolean(m.isReady));
       if (!allReady) {
-        // Mutual Ready gate: do not start until every member is Ready
         break;
       }
       const modeOverride =
@@ -885,13 +910,7 @@ export function mutateRoomInStore(
     }
 
     case 'revealQuestion': {
-      // Force Reveal is disabled in Wait mode: Wait mode ONLY reveals when every member has answered
-      if (room.status === 'active' && room.mode !== 'wait') {
-        room.forceRevealedQuestionIndex = room.currentQuestionIndex;
-        room.isRevealed = true;
-        room.version += 1;
-        room.updatedAt = now;
-      }
+      // Both Wait and Race modes use collective reveal (answers reveal when everyone answers)
       break;
     }
 

@@ -1,9 +1,15 @@
 'use client';
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Hand, SmilePlus, X } from 'lucide-react';
-import { STATUS_BADGES, ZOOM_REACTIONS, type UseRoomReturn } from '@/types/exam';
+import { Check, Hand, Plus, RotateCcw, SlidersHorizontal, SmilePlus, X } from 'lucide-react';
+import { EMOJI_LIBRARY, STATUS_BADGES, type UseRoomReturn } from '@/types/exam';
 import { emitLocalReaction } from './EmojiReactionOverlay';
+import {
+  CUSTOM_REACTIONS_EVENT,
+  DEFAULT_CUSTOM_REACTIONS,
+  readCustomReactions,
+  saveCustomReactions,
+} from './profile';
 import { haptic } from './ui';
 
 const LABELS: Record<string, string> = {
@@ -28,23 +34,41 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
   const [open, setOpen] = useState(false);
   const [tapped, setTapped] = useState<{ emoji: string; n: number } | null>(null);
   const [statusOpen, setStatusOpen] = useState(false);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [reactions, setReactions] = useState<string[]>(DEFAULT_CUSTOM_REACTIONS);
+  const [customEmojiInput, setCustomEmojiInput] = useState('');
   const lastSent = useRef(0);
   const popRef = useRef<HTMLDivElement>(null);
+  const customPopRef = useRef<HTMLDivElement>(null);
   const badge = api.me?.statusBadge ?? null;
 
   useEffect(() => {
-    if (!statusOpen) return;
+    setReactions(readCustomReactions());
+    const onCustom = (e: Event) => {
+      const detail = (e as CustomEvent<string[]>).detail;
+      if (Array.isArray(detail) && detail.length > 0) setReactions(detail);
+    };
+    window.addEventListener(CUSTOM_REACTIONS_EVENT, onCustom);
+    return () => window.removeEventListener(CUSTOM_REACTIONS_EVENT, onCustom);
+  }, []);
+
+  useEffect(() => {
+    if (!statusOpen && !customOpen) return;
     const onDown = (e: PointerEvent) => {
-      if (popRef.current && !popRef.current.contains(e.target as Node)) setStatusOpen(false);
+      const target = e.target as Node;
+      if (statusOpen && popRef.current && !popRef.current.contains(target)) setStatusOpen(false);
+      if (customOpen && customPopRef.current && !customPopRef.current.contains(target)) {
+        setCustomOpen(false);
+      }
     };
     window.addEventListener('pointerdown', onDown);
     return () => window.removeEventListener('pointerdown', onDown);
-  }, [statusOpen]);
+  }, [statusOpen, customOpen]);
 
   const send = (emoji: string) => {
     const now = Date.now();
     setTapped((t) => ({ emoji, n: (t?.n ?? 0) + 1 }));
-    if (now - lastSent.current < 220) return; // gentle spam guard
+    if (now - lastSent.current < 220) return;
     lastSent.current = now;
     haptic(7);
     emitLocalReaction({ emoji, kind: 'general' });
@@ -58,10 +82,28 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
     void api.setStatusBadge(next);
   };
 
+  const toggleEmoji = (emoji: string) => {
+    haptic(5);
+    const exists = reactions.includes(emoji);
+    if (exists && reactions.length <= 1) return;
+    const next = exists ? reactions.filter((r) => r !== emoji) : [...reactions, emoji];
+    setReactions(saveCustomReactions(next));
+  };
+
+  const handleAddCustomEmoji = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleaned = customEmojiInput.trim();
+    if (!cleaned) return;
+    haptic(6);
+    setReactions(saveCustomReactions([...reactions, cleaned]));
+    setCustomEmojiInput('');
+  };
+
   const toggle = () => {
     haptic(6);
     setOpen((v) => !v);
     setStatusOpen(false);
+    setCustomOpen(false);
   };
 
   return (
@@ -73,7 +115,9 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
           className="sheet glass absolute bottom-full right-3 mb-2 w-56 rounded-[22px] p-2 shadow-[0_0_0_1px_var(--line-strong),0_24px_50px_-16px_rgba(0,0,0,0.9)]"
           role="menu"
         >
-          <p className="px-2.5 pb-1.5 pt-1 text-xs font-semibold text-[var(--muted)]">Show a status on your avatar</p>
+          <p className="px-2.5 pb-1.5 pt-1 text-xs font-semibold text-[var(--muted)]">
+            Show a status on your avatar
+          </p>
           {STATUS_BADGES.map((s) => (
             <button
               key={s.emoji}
@@ -82,7 +126,9 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
               aria-checked={badge === s.emoji}
               onClick={() => setBadge(badge === s.emoji ? null : s.emoji)}
               className="press flex w-full items-center gap-3 rounded-2xl px-2.5 py-2 text-left text-sm font-medium hover:bg-white/5"
-              style={badge === s.emoji ? { background: 'var(--paper)', color: 'var(--ink)' } : undefined}
+              style={
+                badge === s.emoji ? { background: 'var(--paper)', color: 'var(--ink)' } : undefined
+              }
             >
               <span className="text-xl">{s.emoji}</span>
               {s.label}
@@ -100,6 +146,70 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
         </div>
       ) : null}
 
+      {/* Customize Reaction Emojis popover */}
+      {customOpen ? (
+        <div
+          ref={customPopRef}
+          className="sheet glass absolute bottom-full right-3 mb-2 w-72 rounded-[22px] p-3 shadow-[0_0_0_1px_var(--line-strong),0_24px_50px_-16px_rgba(0,0,0,0.9)]"
+        >
+          <div className="flex items-center justify-between gap-2 pb-2">
+            <p className="text-xs font-bold text-[var(--paper)]">Customize Reaction Bar</p>
+            <button
+              type="button"
+              onClick={() => {
+                haptic(5);
+                setReactions(saveCustomReactions(DEFAULT_CUSTOM_REACTIONS));
+              }}
+              className="chip !h-6 !min-h-0 !px-2 text-[10px]"
+            >
+              <RotateCcw size={10} /> Reset
+            </button>
+          </div>
+          <div className="grid grid-cols-6 gap-1.5">
+            {EMOJI_LIBRARY.map((emoji) => {
+              const active = reactions.includes(emoji);
+              return (
+                <button
+                  key={emoji}
+                  type="button"
+                  onClick={() => toggleEmoji(emoji)}
+                  aria-pressed={active}
+                  className="press relative flex h-9 items-center justify-center rounded-xl text-lg"
+                  style={{
+                    background: active ? 'var(--surface-3)' : 'var(--ink-2)',
+                    boxShadow: active ? '0 0 0 1.5px var(--lime)' : '0 0 0 1px var(--line)',
+                  }}
+                >
+                  {emoji}
+                  {active ? (
+                    <span className="absolute -right-1 -top-1 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[var(--lime)] text-[var(--ink)]">
+                      <Check size={9} strokeWidth={3.5} />
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+          <form onSubmit={handleAddCustomEmoji} className="mt-2.5 flex gap-1.5">
+            <input
+              type="text"
+              value={customEmojiInput}
+              onChange={(e) => setCustomEmojiInput(e.target.value)}
+              placeholder="Paste emoji (e.g. 🐐)"
+              maxLength={8}
+              className="field !min-h-[34px] flex-1 !rounded-xl px-2.5 text-xs"
+            />
+            <button
+              type="submit"
+              disabled={!customEmojiInput.trim()}
+              className="btn-primary !min-h-[34px] shrink-0 !rounded-xl !px-2.5 text-xs"
+            >
+              <Plus size={14} /> Add
+            </button>
+          </form>
+        </div>
+      ) : null}
+
       {/* Expanded emoji strip */}
       {open ? (
         <div className="rise mb-2 flex items-center gap-1 rounded-[22px] bg-[var(--surface)] p-1 shadow-[0_0_0_1px_var(--line)]">
@@ -112,7 +222,7 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
             role="toolbar"
             aria-label="Send a reaction"
           >
-            {ZOOM_REACTIONS.map((e) => (
+            {reactions.map((e) => (
               <button
                 key={e}
                 type="button"
@@ -134,18 +244,36 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
             type="button"
             onClick={() => {
               haptic(6);
+              setCustomOpen((v) => !v);
+              setStatusOpen(false);
+            }}
+            aria-expanded={customOpen}
+            aria-label="Customize reaction emojis"
+            className="press flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
+            style={{
+              background: customOpen ? 'var(--lime)' : 'var(--surface-3)',
+              color: customOpen ? 'var(--ink)' : 'var(--paper)',
+            }}
+          >
+            <SlidersHorizontal size={16} />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              haptic(6);
               setStatusOpen((v) => !v);
+              setCustomOpen(false);
             }}
             aria-haspopup="menu"
             aria-expanded={statusOpen}
             aria-label={badge ? `Status ${badge}. Change status` : 'Raise hand or set a status'}
-            className="press flex h-11 w-11 shrink-0 items-center justify-center rounded-full"
+            className="press flex h-10 w-10 shrink-0 items-center justify-center rounded-full"
             style={{
               background: badge ? 'var(--paper)' : 'var(--surface-3)',
               color: badge ? 'var(--ink)' : 'var(--paper)',
             }}
           >
-            {badge ? <span className="pop text-lg leading-none">{badge}</span> : <Hand size={18} />}
+            {badge ? <span className="pop text-lg leading-none">{badge}</span> : <Hand size={17} />}
           </button>
         </div>
       ) : null}

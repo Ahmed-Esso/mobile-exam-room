@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  computeQuestionsDigest,
   getRoomFromStore,
   joinRoomInStore,
   mutateRoomInStore,
@@ -34,6 +35,10 @@ export async function POST(
         memberId: String(body.memberId || `user-${Date.now()}`),
         name: String(body.name || 'Player'),
         avatar: String(body.avatar || '🐥'),
+        username: typeof body.username === 'string' ? body.username : undefined,
+        email: typeof body.email === 'string' ? body.email : undefined,
+        pictureUrl:
+          typeof body.pictureUrl === 'string' ? body.pictureUrl : undefined,
       });
       if (!room) {
         return NextResponse.json({ error: 'Room not found' }, { status: 404 });
@@ -45,7 +50,39 @@ export async function POST(
     if (!updated) {
       return NextResponse.json({ error: 'Room not found' }, { status: 404 });
     }
-    return NextResponse.json({ room: updated });
+
+    // Optimize sync payload size: omit heavy questions[] when client already holds the matching digest
+    const serverDigest =
+      updated.questionsDigest || computeQuestionsDigest(updated.questions);
+    const knownDigest =
+      typeof body.knownQuestionsDigest === 'string'
+        ? body.knownQuestionsDigest
+        : '';
+    const includeQuestions = Boolean(body.includeQuestions);
+
+    if (
+      action === 'sync' &&
+      !includeQuestions &&
+      knownDigest &&
+      knownDigest === serverDigest &&
+      updated.questions.length > 0
+    ) {
+      return NextResponse.json({
+        room: {
+          ...updated,
+          questionsDigest: serverDigest,
+          questions: [],
+        },
+        questionsOmitted: true,
+      });
+    }
+
+    return NextResponse.json({
+      room: {
+        ...updated,
+        questionsDigest: serverDigest,
+      },
+    });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Room action failed' },

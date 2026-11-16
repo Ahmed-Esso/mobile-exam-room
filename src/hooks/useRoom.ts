@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import mqtt, { MqttClient } from 'mqtt';
 import {
+  CompactRoomState,
+  ConnectionStatus,
   EmojiReaction,
   GameMode,
   Member,
@@ -12,6 +14,7 @@ import {
   PublicDirectoryUser,
   Question,
   QuestionAttachment,
+  RoomDelta,
   RoomInvite,
   RoomSettingsUpdate,
   RoomState,
@@ -20,7 +23,11 @@ import {
   UserAccount,
 } from '@/types/exam';
 import { parseMarkdownQuestions } from '@/lib/markdown-parser';
-import { mergeRoomStates } from '@/lib/room-store';
+import {
+  computePoints,
+  computeQuestionsDigest,
+  mergeRoomStates,
+} from '@/lib/room-store';
 
 const STORAGE_MEMBER_ID_KEY = 'exam_room_member_id_v2';
 const STORAGE_ACTIVE_ROOM_KEY = 'exam_room_active_code_v2';
@@ -28,13 +35,22 @@ const STORAGE_ACCOUNT_KEY = 'exam_room_account_v4';
 const STORAGE_GOOGLE_CLIENT_ID_KEY = 'exam_room_google_client_id_v1';
 const STORAGE_GEMINI_KEY = 'exam_room_gemini_key_v1';
 const STORAGE_PROFILE_KEY = 'exam_room_profile_v1';
+const STORAGE_ACTION_QUEUE_PREFIX = 'exam_room_queue_v1_';
 const BROADCAST_CHANNEL_NAME = 'exam_room_live_channel_v2';
 const REACTION_TTL_MS = 6500;
+const INVITE_TTL_MS = 1000 * 60 * 15;
 
 const MQTT_BROKERS = [
   'wss://broker.emqx.io:8084/mqtt',
   'wss://test.mosquitto.org:8081/mqtt',
 ];
+
+interface QueuedRoomAction {
+  id: string;
+  action: string;
+  payload: Record<string, unknown>;
+  createdAt: number;
+}
 
 function getOrCreateLocalMemberId(): string {
   if (typeof window === 'undefined') return 'ssr-member';
@@ -50,6 +66,86 @@ function getOrCreateLocalMemberId(): string {
   }
 }
 
+function loadSavedQueue(code: string): QueuedRoomAction[] {
+  if (typeof window === 'undefined' || !code) return [];
+  try {
+    const raw = window.localStorage.getItem(
+      `${STORAGE_ACTION_QUEUE_PREFIX}${code}`
+    );
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveQueue(code: string, queue: QueuedRoomAction[]) {
+  if (typeof window === 'undefined' || !code) return;
+  try {
+    if (queue.length === 0) {
+      window.localStorage.removeItem(`${STORAGE_ACTION_QUEUE_PREFIX}${code}`);
+    } else {
+      window.localStorage.setItem(
+        `${STORAGE_ACTION_QUEUE_PREFIX}${code}`,
+        JSON.stringify(queue)
+      );
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function hasRoomMeaningfullyChanged(
+  prev: RoomState | null,
+  next: RoomState
+): boolean {
+  if (!prev) return true;
+  if (
+    prev.code !== next.code ||
+    prev.status !== next.status ||
+    prev.mode !== next.mode ||
+    prev.title !== next.title ||
+    prev.timePerQuestion !== next.timePerQuestion ||
+    prev.currentQuestionIndex !== next.currentQuestionIndex ||
+    prev.isRevealed !== next.isRevealed ||
+    prev.version !== next.version ||
+    prev.questionsDigest !== next.questionsDigest ||
+    prev.questions.length !== next.questions.length ||
+    prev.members.length !== next.members.length ||
+    prev.reactions.length !== next.reactions.length
+  ) {
+    return true;
+  }
+  if (
+    (prev.kickedMemberIds?.length || 0) !== (next.kickedMemberIds?.length || 0)
+  ) {
+    return true;
+  }
+  for (let i = 0; i < next.members.length; i++) {
+    const a = prev.members[i];
+    const b = next.members[i];
+    if (
+      !a ||
+      a.id !== b.id ||
+      a.name !== b.name ||
+      a.avatar !== b.avatar ||
+      a.score !== b.score ||
+      Boolean(a.isReady) !== Boolean(b.isReady) ||
+      a.statusBadge !== b.statusBadge ||
+      (a.readyForNextQuestionIndex ?? -1) !==
+        (b.readyForNextQuestionIndex ?? -1) ||
+      Object.keys(a.answers).length !== Object.keys(b.answers).length
+    ) {
+      return true;
+    }
+  }
+  const prevLastRx = prev.reactions[prev.reactions.length - 1]?.id;
+  const nextLastRx = next.reactions[next.reactions.length - 1]?.id;
+  if (prevLastRx !== nextLastRx) return true;
+  return false;
+}
+
 export function useRoom(): UseRoomReturn {
   const [room, setRoom] = useState<RoomState | null>(null);
   const [memberId, setMemberId] = useState<string>('');
@@ -61,6 +157,17 @@ export function useRoom(): UseRoomReturn {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  const [presenceTick, setPresenceTick] = useState<number>(() => Date.now());
+
+  const [isLocalOffline, setIsLocalOffline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? !navigator.onLine : false
+  );
+  const [mqttConnected, setMqttConnected] = useState<boolean>(false);
+  const [syncPendingCount, setSyncPendingCount] = useState<number>(0);
+  const [wasKicked, setWasKicked] = useState<boolean>(false);
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >('unsupported');
 
   const channelRef = useRef<BroadcastChannel | null>(null);
   const mqttClientRef = useRef<MqttClient | null>(null);
@@ -68,12 +175,26 @@ export function useRoom(): UseRoomReturn {
   const roomRef = useRef<RoomState | null>(null);
   const accountRef = useRef<UserAccount | null>(null);
   const directoryMapRef = useRef<Map<string, PublicDirectoryUser>>(new Map());
+  const questionsCacheRef = useRef<Map<string, Question[]>>(new Map());
+  const seenDeltaIdsRef = useRef<Set<string>>(new Set());
+  const peerLastSeenRef = useRef<Record<string, number>>({});
+  const peerExplicitStatusRef = useRef<Record<string, ConnectionStatus>>({});
+  const actionQueueRef = useRef<QueuedRoomAction[]>([]);
+  const flushingQueueRef = useRef<boolean>(false);
   const syncStartedAtRef = useRef<number>(0);
   const lastLocalMutationAtRef = useRef<number>(0);
 
   useEffect(() => {
     const id = getOrCreateLocalMemberId();
     setMemberId(id);
+
+    if (typeof window !== 'undefined') {
+      if ('Notification' in window) {
+        setNotificationPermission(Notification.permission);
+      } else {
+        setNotificationPermission('unsupported');
+      }
+    }
 
     try {
       const savedAcc = window.localStorage.getItem(STORAGE_ACCOUNT_KEY);
@@ -100,7 +221,6 @@ export function useRoom(): UseRoomReturn {
       // Ignore storage read errors
     }
 
-    // Fetch configured Google Client ID from backend
     fetch('/api/accounts', { cache: 'no-store' })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -113,6 +233,11 @@ export function useRoom(): UseRoomReturn {
 
   useEffect(() => {
     roomRef.current = room;
+    if (room?.questions && room.questions.length > 0) {
+      const digest =
+        room.questionsDigest || computeQuestionsDigest(room.questions);
+      questionsCacheRef.current.set(digest, room.questions);
+    }
   }, [room]);
 
   useEffect(() => {
@@ -130,9 +255,45 @@ export function useRoom(): UseRoomReturn {
     }
   }, [account]);
 
-  // Only tick every second when there are actually active reactions on screen
+  // Listen to browser online/offline network transitions
   useEffect(() => {
-    const timer = setInterval(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => {
+      setIsLocalOffline(false);
+    };
+    const handleOffline = () => {
+      setIsLocalOffline(true);
+      const client = mqttClientRef.current;
+      const code = roomRef.current?.code;
+      const activeMemberId = memberId || getOrCreateLocalMemberId();
+      if (client && client.connected && code) {
+        try {
+          client.publish(
+            `examroom/v2/${code}/presence`,
+            JSON.stringify({
+              m: activeMemberId,
+              status: 'offline',
+              ts: Date.now(),
+            }),
+            { qos: 0, retain: false }
+          );
+        } catch {
+          // Ignore
+        }
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [memberId]);
+
+  // Tick every 1s only when active floating reactions exist, and every 5s for presence status refresh
+  useEffect(() => {
+    const rxTimer = setInterval(() => {
       const reactions = roomRef.current?.reactions;
       if (reactions && reactions.length > 0) {
         const now = Date.now();
@@ -144,25 +305,145 @@ export function useRoom(): UseRoomReturn {
         }
       }
     }, 1000);
-    return () => clearInterval(timer);
+
+    const presenceTimer = setInterval(() => {
+      if (roomRef.current?.code) {
+        setPresenceTick(Date.now());
+      }
+    }, 5000);
+
+    return () => {
+      clearInterval(rxTimer);
+      clearInterval(presenceTimer);
+    };
   }, []);
 
-  const publishMqttState = useCallback((stateToPublish: RoomState) => {
+  const hydrateRoomQuestions = useCallback((incoming: RoomState): RoomState => {
+    if (incoming.questions && incoming.questions.length > 0) {
+      const digest =
+        incoming.questionsDigest || computeQuestionsDigest(incoming.questions);
+      questionsCacheRef.current.set(digest, incoming.questions);
+      return { ...incoming, questionsDigest: digest };
+    }
+    if (incoming.questionsDigest) {
+      const cached = questionsCacheRef.current.get(incoming.questionsDigest);
+      if (cached && cached.length > 0) {
+        return { ...incoming, questions: cached };
+      }
+    }
+    if (
+      roomRef.current &&
+      roomRef.current.code === incoming.code &&
+      roomRef.current.questions.length > 0 &&
+      (!incoming.questionsDigest ||
+        incoming.questionsDigest === roomRef.current.questionsDigest)
+    ) {
+      return { ...incoming, questions: roomRef.current.questions };
+    }
+    return incoming;
+  }, []);
+
+  const makeCompactRoom = useCallback(
+    (fullRoom: RoomState): CompactRoomState & { questions: Question[] } => {
+      const digest =
+        fullRoom.questionsDigest ||
+        computeQuestionsDigest(fullRoom.questions || []);
+      return {
+        ...fullRoom,
+        questionsDigest: digest,
+        questionCount: fullRoom.questions?.length || 0,
+        questions: [],
+      };
+    },
+    []
+  );
+
+  const handlePossibleKick = useCallback(
+    (nextRoom: RoomState): boolean => {
+      const activeMemberId = memberId || getOrCreateLocalMemberId();
+      if (
+        activeMemberId &&
+        nextRoom.kickedMemberIds?.includes(activeMemberId)
+      ) {
+        if (mqttClientRef.current) {
+          try {
+            mqttClientRef.current.end(true);
+          } catch {
+            // Ignore
+          }
+          mqttClientRef.current = null;
+        }
+        setMqttConnected(false);
+        roomRef.current = null;
+        setRoom(null);
+        setWasKicked(true);
+        setError('You were removed from the room by the host.');
+        if (typeof window !== 'undefined') {
+          try {
+            window.localStorage.removeItem(STORAGE_ACTIVE_ROOM_KEY);
+          } catch {
+            // Ignore
+          }
+        }
+        return true;
+      }
+      return false;
+    },
+    [memberId]
+  );
+
+  const publishMqttState = useCallback(
+    (stateToPublish: RoomState, includeQuestions = false) => {
+      const client = mqttClientRef.current;
+      if (!client || !client.connected || !stateToPublish?.code) return;
+      try {
+        const digest =
+          stateToPublish.questionsDigest ||
+          computeQuestionsDigest(stateToPublish.questions || []);
+
+        if (includeQuestions && stateToPublish.questions?.length > 0) {
+          client.publish(
+            `examroom/v2/${stateToPublish.code}/questions`,
+            JSON.stringify({
+              digest,
+              questionsUpdatedAt: stateToPublish.questionsUpdatedAt || Date.now(),
+              questions: stateToPublish.questions,
+            }),
+            { qos: 1, retain: true }
+          );
+        }
+
+        const stateTopic = `examroom/v2/${stateToPublish.code}/state`;
+        const payloadObj = makeCompactRoom({
+          ...stateToPublish,
+          questionsDigest: digest,
+        });
+        client.publish(stateTopic, JSON.stringify(payloadObj), {
+          qos: 1,
+          retain: true,
+        });
+      } catch {
+        // Ignore MQTT publish errors
+      }
+    },
+    [makeCompactRoom]
+  );
+
+  const publishMqttDelta = useCallback((code: string, delta: RoomDelta) => {
     const client = mqttClientRef.current;
-    if (!client || !client.connected || !stateToPublish?.code) return;
+    if (!client || !client.connected || !code) return;
     try {
-      const stateTopic = `examroom/v2/${stateToPublish.code}/state`;
-      client.publish(stateTopic, JSON.stringify(stateToPublish), {
+      client.publish(`examroom/v2/${code}/delta`, JSON.stringify(delta), {
         qos: 1,
-        retain: true,
+        retain: false,
       });
     } catch {
-      // Ignore MQTT publish errors
+      // Ignore MQTT delta publish errors
     }
   }, []);
 
-  const applyAndBroadcastRoom = useCallback(
-    (nextRoom: RoomState | null, shouldPublishMqtt = true) => {
+  const commitRoomState = useCallback(
+    (nextRoom: RoomState | null, options?: { publishMqtt?: boolean; includeQuestions?: boolean }) => {
       if (!nextRoom) {
         roomRef.current = null;
         setRoom(null);
@@ -176,28 +457,395 @@ export function useRoom(): UseRoomReturn {
         return;
       }
 
-      setRoom((prev) => {
-        const merged =
-          prev && prev.code === nextRoom.code
-            ? mergeRoomStates(prev, nextRoom)
-            : nextRoom;
-        roomRef.current = merged;
+      const hydrated = hydrateRoomQuestions(nextRoom);
+      if (handlePossibleKick(hydrated)) {
+        return;
+      }
 
-        if (typeof window !== 'undefined') {
-          try {
-            window.localStorage.setItem(STORAGE_ACTIVE_ROOM_KEY, merged.code);
-            channelRef.current?.postMessage(merged);
-          } catch {
-            // Ignore
-          }
+      const prev = roomRef.current;
+      const merged =
+        prev && prev.code === hydrated.code
+          ? mergeRoomStates(prev, hydrated)
+          : hydrated;
+
+      if (handlePossibleKick(merged)) {
+        return;
+      }
+
+      roomRef.current = merged;
+      if (hasRoomMeaningfullyChanged(prev, merged)) {
+        setRoom(merged);
+      }
+
+      if (typeof window !== 'undefined') {
+        try {
+          window.localStorage.setItem(STORAGE_ACTIVE_ROOM_KEY, merged.code);
+          channelRef.current?.postMessage(merged);
+        } catch {
+          // Ignore
         }
-        if (shouldPublishMqtt) {
-          publishMqttState(merged);
-        }
-        return merged;
-      });
+      }
+      if (options?.publishMqtt) {
+        publishMqttState(merged, options.includeQuestions);
+      }
     },
-    [publishMqttState]
+    [hydrateRoomQuestions, handlePossibleKick, publishMqttState]
+  );
+
+  const applyDeltaToRoom = useCallback(
+    (delta: RoomDelta) => {
+      if (!roomRef.current) return;
+      if ('id' in delta && delta.id) {
+        if (seenDeltaIdsRef.current.has(delta.id)) return;
+        seenDeltaIdsRef.current.add(delta.id);
+        if (seenDeltaIdsRef.current.size > 300) {
+          const arr = Array.from(seenDeltaIdsRef.current).slice(-150);
+          seenDeltaIdsRef.current = new Set(arr);
+        }
+      }
+
+      const current = roomRef.current;
+      const now = Date.now();
+      let updated: RoomState | null = null;
+
+      if (delta.t === 'hb') {
+        peerLastSeenRef.current[delta.m] = delta.ts || now;
+        peerExplicitStatusRef.current[delta.m] = delta.status;
+        setPresenceTick(now);
+        return;
+      }
+
+      if ('m' in delta && delta.m) {
+        peerLastSeenRef.current[delta.m] = Math.max(
+          peerLastSeenRef.current[delta.m] || 0,
+          delta.ts || now
+        );
+        peerExplicitStatusRef.current[delta.m] = 'online';
+      }
+
+      switch (delta.t) {
+        case 'ready': {
+          if (current.status !== 'lobby') return;
+          const nextMembers = current.members.map((m) =>
+            m.id === delta.m
+              ? { ...m, isReady: delta.r, lastSeenAt: delta.ts }
+              : m
+          );
+          const allReady =
+            nextMembers.length >= 2 &&
+            current.questions.length > 0 &&
+            nextMembers.every((m) => Boolean(m.isReady));
+
+          updated = {
+            ...current,
+            status: allReady ? 'active' : current.status,
+            currentQuestionIndex: allReady ? 0 : current.currentQuestionIndex,
+            questionStartedAt: allReady ? delta.ts : current.questionStartedAt,
+            examSessionId: allReady ? delta.ts : current.examSessionId,
+            members: allReady
+              ? nextMembers.map((m) => ({
+                  ...m,
+                  isReady: false,
+                  readyForNextQuestionIndex: -1,
+                  score: 0,
+                  streak: 0,
+                  bestStreak: 0,
+                  correctCount: 0,
+                  totalTimeMs: 0,
+                  answers: {},
+                }))
+              : nextMembers,
+            version: current.version + 1,
+            updatedAt: Math.max(current.updatedAt, delta.ts),
+          };
+          break;
+        }
+
+        case 'ans': {
+          if (current.status !== 'active' || delta.q !== current.currentQuestionIndex) {
+            return;
+          }
+          const qObj = current.questions[delta.q];
+          if (!qObj) return;
+          const targetMember = current.members.find((m) => m.id === delta.m);
+          if (!targetMember || targetMember.answers[delta.q] !== undefined) {
+            return;
+          }
+          const safeOpt = Math.max(
+            0,
+            Math.min(qObj.options.length - 1, delta.o)
+          );
+          const timeMs = Math.max(250, delta.ts - current.questionStartedAt);
+          const isCorrect = safeOpt === qObj.correctIndex;
+          const { pointsEarned, speedBonus } = computePoints(
+            current,
+            targetMember,
+            isCorrect,
+            timeMs,
+            delta.q
+          );
+          const newAns: MemberAnswer = {
+            questionIndex: delta.q,
+            optionIndex: safeOpt,
+            answeredAt: delta.ts,
+            timeMs,
+            isCorrect,
+            pointsEarned,
+            speedBonus,
+          };
+          const nextMembers = current.members.map((m) => {
+            if (m.id !== delta.m) return m;
+            return {
+              ...m,
+              score: isCorrect ? m.score + pointsEarned : m.score,
+              streak: isCorrect ? m.streak + 1 : 0,
+              bestStreak: isCorrect
+                ? Math.max(m.bestStreak, m.streak + 1)
+                : m.bestStreak,
+              correctCount: isCorrect ? m.correctCount + 1 : m.correctCount,
+              totalTimeMs: m.totalTimeMs + timeMs,
+              lastSeenAt: delta.ts,
+              answers: { ...m.answers, [delta.q]: newAns },
+            };
+          });
+          const allAnswered =
+            nextMembers.length > 0 &&
+            nextMembers.every((m) => m.answers[delta.q] !== undefined);
+          updated = {
+            ...current,
+            members: nextMembers,
+            isRevealed: allAnswered,
+            version: current.version + 1,
+            updatedAt: Math.max(current.updatedAt, delta.ts),
+          };
+          break;
+        }
+
+        case 'next': {
+          if (current.status !== 'active' || delta.q !== current.currentQuestionIndex) {
+            return;
+          }
+          const nextMembers = current.members.map((m) =>
+            m.id === delta.m
+              ? {
+                  ...m,
+                  readyForNextQuestionIndex: Math.max(
+                    m.readyForNextQuestionIndex ?? -1,
+                    delta.q
+                  ),
+                  lastSeenAt: delta.ts,
+                }
+              : m
+          );
+          const allNextReady =
+            nextMembers.length > 0 &&
+            nextMembers.every(
+              (m) => (m.readyForNextQuestionIndex ?? -1) >= delta.q
+            );
+
+          let nextIdx = current.currentQuestionIndex;
+          let nextStatus: RoomState['status'] = current.status;
+          let nextStartedAt = current.questionStartedAt;
+          let nextRevealed = current.isRevealed;
+
+          if (allNextReady) {
+            if (current.currentQuestionIndex + 1 < current.questions.length) {
+              nextIdx += 1;
+              nextStartedAt = delta.ts;
+              nextRevealed = false;
+            } else {
+              nextStatus = 'finished';
+              nextRevealed = true;
+            }
+          }
+
+          updated = {
+            ...current,
+            status: nextStatus,
+            currentQuestionIndex: nextIdx,
+            questionStartedAt: nextStartedAt,
+            isRevealed: nextRevealed,
+            members: nextMembers,
+            version: current.version + 1,
+            updatedAt: Math.max(current.updatedAt, delta.ts),
+          };
+          break;
+        }
+
+        case 'rx': {
+          if (current.reactions.some((r) => r.id === delta.rx.id)) return;
+          updated = {
+            ...current,
+            reactions: [...current.reactions, delta.rx].slice(-40),
+            version: current.version + 1,
+            updatedAt: Math.max(current.updatedAt, delta.ts),
+          };
+          break;
+        }
+
+        case 'badge': {
+          updated = {
+            ...current,
+            members: current.members.map((m) =>
+              m.id === delta.m
+                ? { ...m, statusBadge: delta.b, lastSeenAt: delta.ts }
+                : m
+            ),
+            version: current.version + 1,
+            updatedAt: Math.max(current.updatedAt, delta.ts),
+          };
+          break;
+        }
+
+        case 'prof': {
+          updated = {
+            ...current,
+            members: current.members.map((m) => {
+              if (m.id !== delta.m) return m;
+              return {
+                ...m,
+                name: delta.name || m.name,
+                avatar: delta.avatar || m.avatar,
+                username: delta.username || m.username,
+                lastSeenAt: delta.ts,
+              };
+            }),
+            version: current.version + 1,
+            updatedAt: Math.max(current.updatedAt, delta.ts),
+          };
+          break;
+        }
+
+        case 'kick': {
+          const nextKicked = Array.from(
+            new Set([...(current.kickedMemberIds || []), delta.target])
+          );
+          const nextMembers = current.members.filter(
+            (m) => m.id !== delta.target
+          );
+          const qIdx = current.currentQuestionIndex;
+          const allAns =
+            nextMembers.length > 0 &&
+            nextMembers.every((m) => m.answers[qIdx] !== undefined);
+          updated = {
+            ...current,
+            kickedMemberIds: nextKicked,
+            members: nextMembers,
+            isRevealed:
+              current.status === 'active' ? allAns : current.isRevealed,
+            version: current.version + 1,
+            updatedAt: Math.max(current.updatedAt, delta.ts),
+          };
+          break;
+        }
+      }
+
+      if (updated) {
+        commitRoomState(updated, { publishMqtt: false });
+      }
+    },
+    [commitRoomState]
+  );
+
+  // Offline-resilient HTTP action queue flusher
+  const flushActionQueue = useCallback(async () => {
+    const code = roomRef.current?.code;
+    if (!code || flushingQueueRef.current) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    if (actionQueueRef.current.length === 0) return;
+
+    flushingQueueRef.current = true;
+    const activeMemberId = memberId || getOrCreateLocalMemberId();
+
+    try {
+      while (actionQueueRef.current.length > 0) {
+        const item = actionQueueRef.current[0];
+        const currentRoom = roomRef.current;
+        if (!currentRoom || currentRoom.code !== code) break;
+
+        let attempt = 0;
+        let succeeded = false;
+        const backoffs = [600, 1500, 3000];
+
+        while (attempt <= backoffs.length) {
+          try {
+            const sendFallback =
+              item.action === 'setQuestions'
+                ? currentRoom
+                : makeCompactRoom(currentRoom);
+
+            const res = await fetch(
+              `/api/rooms/${encodeURIComponent(code)}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  action: item.action,
+                  memberId: activeMemberId,
+                  fallbackRoom: sendFallback,
+                  knownQuestionsDigest:
+                    currentRoom.questionsDigest ||
+                    computeQuestionsDigest(currentRoom.questions || []),
+                  ...item.payload,
+                }),
+              }
+            );
+            const data = await res.json();
+            if (res.ok && data?.room) {
+              succeeded = true;
+              if (lastLocalMutationAtRef.current <= item.createdAt) {
+                commitRoomState(data.room, {
+                  publishMqtt: true,
+                  includeQuestions: item.action === 'setQuestions',
+                });
+              }
+              break;
+            } else if (res.status >= 400 && res.status < 500) {
+              // Deterministic 4xx (not transient) — drop from queue
+              if (data?.error) setError(data.error);
+              succeeded = true;
+              break;
+            }
+          } catch {
+            // Network error — retry with backoff
+          }
+
+          if (attempt < backoffs.length) {
+            await new Promise((r) => setTimeout(r, backoffs[attempt]));
+          }
+          attempt++;
+        }
+
+        if (succeeded) {
+          actionQueueRef.current.shift();
+          saveQueue(code, actionQueueRef.current);
+          setSyncPendingCount(actionQueueRef.current.length);
+        } else {
+          // Still offline / unreachable — pause flushing until next online/MQTT event
+          break;
+        }
+      }
+    } finally {
+      flushingQueueRef.current = false;
+    }
+  }, [memberId, makeCompactRoom, commitRoomState]);
+
+  const enqueueRoomAction = useCallback(
+    (action: string, payload: Record<string, unknown> = {}) => {
+      const code = roomRef.current?.code;
+      if (!code) return;
+      const item: QueuedRoomAction = {
+        id: `qa-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        action,
+        payload,
+        createdAt: Date.now(),
+      };
+      actionQueueRef.current.push(item);
+      saveQueue(code, actionQueueRef.current);
+      setSyncPendingCount(actionQueueRef.current.length);
+      void flushActionQueue();
+    },
+    [flushActionQueue]
   );
 
   // Setup BroadcastChannel for instant same-browser tab sync
@@ -211,12 +859,7 @@ export function useRoom(): UseRoomReturn {
     bc.onmessage = (event) => {
       const incoming = event.data as RoomState | undefined;
       if (incoming && incoming.code && incoming.code === roomRef.current?.code) {
-        setRoom((prev) => {
-          if (!prev) return incoming;
-          const merged = mergeRoomStates(prev, incoming);
-          roomRef.current = merged;
-          return merged;
-        });
+        commitRoomState(incoming, { publishMqtt: false });
       }
     };
 
@@ -224,9 +867,61 @@ export function useRoom(): UseRoomReturn {
       bc.close();
       channelRef.current = null;
     };
+  }, [commitRoomState]);
+
+  const triggerInviteNotification = useCallback(
+    async (invite: RoomInvite) => {
+      if (typeof window === 'undefined') return;
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate([80, 40, 100]);
+        } catch {
+          // Ignore
+        }
+      }
+      if (!('Notification' in window) || Notification.permission !== 'granted') {
+        return;
+      }
+
+      const title = `${invite.fromAvatar} ${invite.fromName} invited you!`;
+      const options: NotificationOptions = {
+        body: `Join "${invite.roomTitle}" (Room ${invite.roomCode})`,
+        icon: '/api/pwa-icon?size=192',
+        tag: `invite-${invite.roomCode}`,
+      };
+
+      try {
+        if ('serviceWorker' in navigator) {
+          const reg = await navigator.serviceWorker.ready;
+          if (reg && typeof reg.showNotification === 'function') {
+            await reg.showNotification(title, options);
+            return;
+          }
+        }
+        new Notification(title, options);
+      } catch {
+        // Ignore notification errors on unsupported webviews
+      }
+    },
+    []
+  );
+
+  const requestNotificationPermission = useCallback(async (): Promise<
+    NotificationPermission | 'unsupported'
+  > => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      return 'unsupported';
+    }
+    try {
+      const perm = await Notification.requestPermission();
+      setNotificationPermission(perm);
+      return perm;
+    } catch {
+      return Notification.permission;
+    }
   }, []);
 
-  // Global MQTT user directory + live @username invites listener
+  // Global MQTT user directory + reliable retained inbox + live invites listener
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -234,6 +929,9 @@ export function useRoom(): UseRoomReturn {
     const username = account?.username?.toLowerCase();
     const inviteTopic = username
       ? `examroom/v2/user/${encodeURIComponent(username)}/invites`
+      : null;
+    const inboxTopic = username
+      ? `examroom/v2/user/${encodeURIComponent(username)}/inbox`
       : null;
     const directoryWildcard = 'examroom/v2/directory/+';
 
@@ -247,12 +945,11 @@ export function useRoom(): UseRoomReturn {
 
     client.on('connect', () => {
       if (cancelled) return;
-      const topics = inviteTopic
-        ? [inviteTopic, directoryWildcard]
-        : [directoryWildcard];
+      const topics = [directoryWildcard];
+      if (inviteTopic) topics.push(inviteTopic);
+      if (inboxTopic) topics.push(inboxTopic);
       client.subscribe(topics, { qos: 1 });
 
-      // Publish retained user directory entry so friends on any serverless container can find this @username
       if (account?.username && account?.email) {
         const dirTopic = `examroom/v2/directory/${account.username.toLowerCase()}`;
         const dirEntry: PublicDirectoryUser = {
@@ -269,6 +966,48 @@ export function useRoom(): UseRoomReturn {
       }
     });
 
+    const mergeIncomingInvites = (incomingList: RoomInvite[]) => {
+      const now = Date.now();
+      const validIncoming = incomingList.filter(
+        (i) => i?.id && i?.roomCode && now - i.createdAt <= INVITE_TTL_MS
+      );
+      if (validIncoming.length === 0) return;
+
+      setAccount((prev) => {
+        if (!prev) return prev;
+        const map = new Map<string, RoomInvite>();
+        for (const oldInv of prev.invites || []) {
+          if (now - oldInv.createdAt <= INVITE_TTL_MS) {
+            map.set(oldInv.id, oldInv);
+          }
+        }
+        let addedNew: RoomInvite | null = null;
+        for (const inc of validIncoming) {
+          if (!map.has(inc.id)) {
+            addedNew = inc;
+          }
+          map.set(inc.id, inc);
+        }
+        if (addedNew) {
+          void triggerInviteNotification(addedNew);
+        }
+        const mergedInvites = Array.from(map.values()).sort(
+          (a, b) => b.createdAt - a.createdAt
+        );
+        if (
+          mergedInvites.length === prev.invites.length &&
+          mergedInvites[0]?.id === prev.invites[0]?.id
+        ) {
+          return prev;
+        }
+        return {
+          ...prev,
+          invites: mergedInvites,
+          updatedAt: now,
+        };
+      });
+    };
+
     client.on('message', (topic, payload) => {
       if (cancelled) return;
       try {
@@ -280,21 +1019,18 @@ export function useRoom(): UseRoomReturn {
           return;
         }
 
+        if (inboxTopic && topic === inboxTopic) {
+          const parsed = JSON.parse(payload.toString());
+          if (Array.isArray(parsed)) {
+            mergeIncomingInvites(parsed as RoomInvite[]);
+          }
+          return;
+        }
+
         if (inviteTopic && topic === inviteTopic) {
           const invite = JSON.parse(payload.toString()) as RoomInvite;
           if (invite?.id && invite?.roomCode) {
-            setAccount((prev) => {
-              if (!prev) return prev;
-              if (prev.invites.some((i) => i.id === invite.id)) return prev;
-              return {
-                ...prev,
-                invites: [
-                  invite,
-                  ...prev.invites.filter((i) => i.roomCode !== invite.roomCode),
-                ],
-                updatedAt: Date.now(),
-              };
-            });
+            mergeIncomingInvites([invite]);
           }
         }
       } catch {
@@ -304,6 +1040,7 @@ export function useRoom(): UseRoomReturn {
 
     const syncAccount = async () => {
       if (!accountRef.current?.email) return;
+      if (typeof document !== 'undefined' && document.hidden) return;
       try {
         const res = await fetch('/api/accounts', {
           method: 'POST',
@@ -329,9 +1066,19 @@ export function useRoom(): UseRoomReturn {
     }
     const interval = setInterval(syncAccount, 5000);
 
+    const onWake = () => {
+      if (!document.hidden && accountRef.current?.email) {
+        void syncAccount();
+      }
+    };
+    window.addEventListener('focus', onWake);
+    document.addEventListener('visibilitychange', onWake);
+
     return () => {
       cancelled = true;
       clearInterval(interval);
+      window.removeEventListener('focus', onWake);
+      document.removeEventListener('visibilitychange', onWake);
       try {
         client.end(true);
       } catch {
@@ -339,16 +1086,30 @@ export function useRoom(): UseRoomReturn {
       }
       userMqttClientRef.current = null;
     };
-  }, [account?.username, account?.email, account?.name, account?.avatar, account?.pictureUrl]);
+  }, [
+    account?.username,
+    account?.email,
+    account?.name,
+    account?.avatar,
+    account?.pictureUrl,
+    triggerInviteNotification,
+  ]);
 
-  // Real-time MQTT over WebSockets for instant multi-phone Room sync across Vercel instances
+  // Real-time MQTT over WebSockets for Room: delta + state + questions + presence + LWT
   useEffect(() => {
     const code = room?.code;
     if (!code || typeof window === 'undefined') return;
 
+    actionQueueRef.current = loadSavedQueue(code);
+    setSyncPendingCount(actionQueueRef.current.length);
+
     let brokerIdx = 0;
     let isCancelled = false;
+    const activeMemberId = memberId || getOrCreateLocalMemberId();
     const stateTopic = `examroom/v2/${code}/state`;
+    const questionsTopic = `examroom/v2/${code}/questions`;
+    const deltaTopic = `examroom/v2/${code}/delta`;
+    const presenceTopic = `examroom/v2/${code}/presence`;
     const pingTopic = `examroom/v2/${code}/ping`;
 
     const connectBroker = (url: string) => {
@@ -356,81 +1117,169 @@ export function useRoom(): UseRoomReturn {
         clientId: `exam-${code}-${Math.random().toString(36).slice(2, 9)}`,
         clean: true,
         connectTimeout: 5000,
-        reconnectPeriod: 2000,
+        reconnectPeriod: 1500,
+        keepalive: 15,
+        will: {
+          topic: presenceTopic,
+          payload: JSON.stringify({
+            m: activeMemberId,
+            status: 'offline',
+            ts: Date.now(),
+          }),
+          qos: 1,
+          retain: false,
+        },
       });
 
       mqttClientRef.current = client;
 
       client.on('connect', () => {
         if (isCancelled) return;
-        client.subscribe([stateTopic, pingTopic], { qos: 1 }, () => {
-          if (roomRef.current && roomRef.current.code === code) {
-            if (roomRef.current.hostId !== '') {
-              client.publish(stateTopic, JSON.stringify(roomRef.current), {
-                qos: 1,
-                retain: true,
-              });
-            }
+        setMqttConnected(true);
+        setIsLocalOffline(false);
+
+        client.subscribe(
+          [stateTopic, questionsTopic, deltaTopic, presenceTopic, pingTopic],
+          { qos: 1 },
+          () => {
+            // Announce presence online immediately
             client.publish(
-              pingTopic,
+              presenceTopic,
               JSON.stringify({
-                sender: getOrCreateLocalMemberId(),
+                m: activeMemberId,
+                status: 'online',
                 ts: Date.now(),
               }),
               { qos: 0, retain: false }
             );
+
+            if (roomRef.current && roomRef.current.code === code) {
+              if (roomRef.current.hostId !== '') {
+                publishMqttState(
+                  roomRef.current,
+                  roomRef.current.questions.length > 0
+                );
+              }
+              client.publish(
+                pingTopic,
+                JSON.stringify({
+                  sender: activeMemberId,
+                  ts: Date.now(),
+                }),
+                { qos: 0, retain: false }
+              );
+            }
+            void flushActionQueue();
           }
-        });
+        );
+      });
+
+      client.on('offline', () => {
+        if (!isCancelled) setMqttConnected(false);
+      });
+
+      client.on('close', () => {
+        if (!isCancelled) setMqttConnected(false);
       });
 
       client.on('message', (topic, payload) => {
         if (isCancelled) return;
         try {
+          if (topic === presenceTopic) {
+            const p = JSON.parse(payload.toString()) as {
+              m: string;
+              status: ConnectionStatus;
+              ts: number;
+            };
+            if (p?.m) {
+              peerLastSeenRef.current[p.m] = p.ts || Date.now();
+              peerExplicitStatusRef.current[p.m] = p.status || 'online';
+              setPresenceTick(Date.now());
+            }
+            return;
+          }
+
+          if (topic === deltaTopic) {
+            const delta = JSON.parse(payload.toString()) as RoomDelta;
+            if (delta && delta.t) {
+              applyDeltaToRoom(delta);
+            }
+            return;
+          }
+
+          if (topic === questionsTopic) {
+            const qPack = JSON.parse(payload.toString()) as {
+              digest: string;
+              questionsUpdatedAt?: number;
+              questions: Question[];
+            };
+            if (
+              qPack?.digest &&
+              Array.isArray(qPack.questions) &&
+              qPack.questions.length > 0
+            ) {
+              questionsCacheRef.current.set(qPack.digest, qPack.questions);
+              if (
+                roomRef.current &&
+                roomRef.current.code === code &&
+                roomRef.current.questions.length === 0
+              ) {
+                commitRoomState(
+                  {
+                    ...roomRef.current,
+                    questions: qPack.questions,
+                    questionsDigest: qPack.digest,
+                    questionsUpdatedAt:
+                      qPack.questionsUpdatedAt || Date.now(),
+                  },
+                  { publishMqtt: false }
+                );
+              }
+            }
+            return;
+          }
+
           if (topic === pingTopic) {
             const pingData = JSON.parse(payload.toString());
             if (
-              pingData?.sender !== getOrCreateLocalMemberId() &&
+              pingData?.sender !== activeMemberId &&
               roomRef.current &&
               roomRef.current.code === code &&
               roomRef.current.hostId !== ''
             ) {
-              client.publish(stateTopic, JSON.stringify(roomRef.current), {
-                qos: 1,
-                retain: true,
-              });
+              publishMqttState(
+                roomRef.current,
+                roomRef.current.questions.length > 0
+              );
             }
             return;
           }
 
           if (topic === stateTopic) {
-            const incoming = JSON.parse(payload.toString()) as RoomState;
-            if (!incoming || incoming.code !== code) return;
+            const incomingRaw = JSON.parse(payload.toString()) as RoomState;
+            if (!incomingRaw || incomingRaw.code !== code) return;
 
-            setRoom((prev) => {
-              if (!prev || prev.code !== code) {
-                roomRef.current = incoming;
-                return incoming;
+            for (const m of incomingRaw.members || []) {
+              if (m.lastSeenAt) {
+                peerLastSeenRef.current[m.id] = Math.max(
+                  peerLastSeenRef.current[m.id] || 0,
+                  m.lastSeenAt
+                );
               }
-              const prevMemberCount = prev.members.length;
-              const merged = mergeRoomStates(prev, incoming);
-              roomRef.current = merged;
+            }
 
-              if (
-                merged.hostId !== '' &&
-                (merged.members.length > incoming.members.length ||
-                  merged.members.length > prevMemberCount)
-              ) {
-                try {
-                  client.publish(stateTopic, JSON.stringify(merged), {
-                    qos: 1,
-                    retain: true,
-                  });
-                } catch {
-                  // Ignore
-                }
-              }
-              return merged;
-            });
+            const prevCount = roomRef.current?.members.length || 0;
+            commitRoomState(incomingRaw, { publishMqtt: false });
+
+            if (
+              roomRef.current &&
+              roomRef.current.hostId !== '' &&
+              (roomRef.current.members.length >
+                (incomingRaw.members?.length || 0) ||
+                roomRef.current.members.length > prevCount)
+            ) {
+              publishMqttState(roomRef.current, false);
+            }
           }
         } catch {
           // Ignore malformed MQTT messages
@@ -439,6 +1288,7 @@ export function useRoom(): UseRoomReturn {
 
       client.on('error', () => {
         if (isCancelled) return;
+        setMqttConnected(false);
         if (brokerIdx === 0 && MQTT_BROKERS.length > 1) {
           brokerIdx = 1;
           try {
@@ -453,8 +1303,34 @@ export function useRoom(): UseRoomReturn {
 
     connectBroker(MQTT_BROKERS[0]);
 
+    // 4s Presence Heartbeat over MQTT
+    const hbInterval = setInterval(() => {
+      if (
+        mqttClientRef.current &&
+        mqttClientRef.current.connected &&
+        typeof document !== 'undefined' &&
+        !document.hidden
+      ) {
+        try {
+          mqttClientRef.current.publish(
+            presenceTopic,
+            JSON.stringify({
+              m: activeMemberId,
+              status: navigator.onLine ? 'online' : 'offline',
+              ts: Date.now(),
+            }),
+            { qos: 0, retain: false }
+          );
+        } catch {
+          // Ignore
+        }
+      }
+    }, 4000);
+
     return () => {
       isCancelled = true;
+      clearInterval(hbInterval);
+      setMqttConnected(false);
       if (mqttClientRef.current) {
         try {
           mqttClientRef.current.end(true);
@@ -464,20 +1340,44 @@ export function useRoom(): UseRoomReturn {
         mqttClientRef.current = null;
       }
     };
-  }, [room?.code]);
+  }, [
+    room?.code,
+    memberId,
+    publishMqttState,
+    applyDeltaToRoom,
+    commitRoomState,
+    flushActionQueue,
+  ]);
 
-  // Bi-directional HTTP sync every 800ms with fallbackRoom CRDT merge
+  // Adaptive, visibility-aware HTTP sync (2.5s when MQTT connected, 1s when disconnected, paused when hidden)
   useEffect(() => {
     if (!room?.code) return;
     let cancelled = false;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
     const code = room.code;
 
     const syncWithServer = async () => {
+      if (cancelled) return;
+      if (typeof document !== 'undefined' && document.hidden) {
+        return;
+      }
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        timerId = setTimeout(syncWithServer, 2000);
+        return;
+      }
+
       const requestStartedAt = Date.now();
       syncStartedAtRef.current = requestStartedAt;
+
       try {
         const currentRoom = roomRef.current;
         const activeMemberId = memberId || getOrCreateLocalMemberId();
+        const knownDigest =
+          currentRoom?.questionsDigest ||
+          (currentRoom?.questions?.length
+            ? computeQuestionsDigest(currentRoom.questions)
+            : '');
+
         const res = await fetch(`/api/rooms/${encodeURIComponent(code)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -485,34 +1385,57 @@ export function useRoom(): UseRoomReturn {
           body: JSON.stringify({
             action: 'sync',
             memberId: activeMemberId,
-            fallbackRoom: currentRoom,
+            knownQuestionsDigest: knownDigest,
+            includeQuestions:
+              !currentRoom?.questions || currentRoom.questions.length === 0,
+            fallbackRoom: currentRoom ? makeCompactRoom(currentRoom) : undefined,
           }),
         });
-        if (!res.ok) return;
-        const data = await res.json();
-        // Discard stale in-flight sync response if a local optimistic mutation happened after this poll started
-        if (lastLocalMutationAtRef.current > requestStartedAt) {
-          return;
-        }
-        if (!cancelled && data?.room) {
-          setRoom((prev) => {
-            if (!prev) return data.room;
-            const merged = mergeRoomStates(prev, data.room);
-            roomRef.current = merged;
-            return merged;
-          });
+        if (res.ok) {
+          const data = await res.json();
+          if (
+            !cancelled &&
+            data?.room &&
+            lastLocalMutationAtRef.current <= requestStartedAt
+          ) {
+            commitRoomState(data.room, { publishMqtt: false });
+          }
         }
       } catch {
         // Ignore transient network errors
+      } finally {
+        if (!cancelled) {
+          const delay = mqttConnected ? 2500 : 1000;
+          timerId = setTimeout(syncWithServer, delay);
+        }
       }
     };
 
-    const interval = setInterval(syncWithServer, 800);
+    const handleWakeUp = () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (timerId) clearTimeout(timerId);
+      void flushActionQueue();
+      void syncWithServer();
+    };
+
+    timerId = setTimeout(syncWithServer, mqttConnected ? 2500 : 1000);
+    window.addEventListener('online', handleWakeUp);
+    document.addEventListener('visibilitychange', handleWakeUp);
+
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      if (timerId) clearTimeout(timerId);
+      window.removeEventListener('online', handleWakeUp);
+      document.removeEventListener('visibilitychange', handleWakeUp);
     };
-  }, [room?.code, memberId]);
+  }, [
+    room?.code,
+    memberId,
+    mqttConnected,
+    makeCompactRoom,
+    commitRoomState,
+    flushActionQueue,
+  ]);
 
   // Sync geminiApiKey when account syncs from server
   useEffect(() => {
@@ -564,6 +1487,7 @@ export function useRoom(): UseRoomReturn {
   }, []);
 
   const clearError = useCallback(() => setError(null), []);
+  const clearKickedNotice = useCallback(() => setWasKicked(false), []);
 
   const saveGoogleClientId = useCallback(async (clientId: string) => {
     const trimmed = clientId.trim();
@@ -806,6 +1730,17 @@ export function useRoom(): UseRoomReturn {
             qos: 1,
             retain: false,
           });
+
+          const inboxTopic = `examroom/v2/user/${encodeURIComponent(
+            cleanTo
+          )}/inbox`;
+          const inboxPayload = Array.isArray(data.inboxInvites)
+            ? data.inboxInvites
+            : [data.invite];
+          client.publish(inboxTopic, JSON.stringify(inboxPayload), {
+            qos: 1,
+            retain: true,
+          });
         }
         return true;
       } catch (err) {
@@ -819,11 +1754,21 @@ export function useRoom(): UseRoomReturn {
   const dismissRoomInvite = useCallback(async (inviteId: string) => {
     const currentAcc = accountRef.current;
     if (!currentAcc) return;
-    setAccount((prev) =>
-      prev
-        ? { ...prev, invites: prev.invites.filter((i) => i.id !== inviteId) }
-        : prev
-    );
+    const nextInvites = currentAcc.invites.filter((i) => i.id !== inviteId);
+    setAccount((prev) => (prev ? { ...prev, invites: nextInvites } : prev));
+
+    // Update retained MQTT inbox so dismissed invite doesn't return
+    const client = userMqttClientRef.current || mqttClientRef.current;
+    if (client && client.connected && currentAcc.username) {
+      const inboxTopic = `examroom/v2/user/${encodeURIComponent(
+        currentAcc.username.toLowerCase()
+      )}/inbox`;
+      client.publish(inboxTopic, JSON.stringify(nextInvites), {
+        qos: 1,
+        retain: true,
+      });
+    }
+
     try {
       const res = await fetch('/api/accounts', {
         method: 'POST',
@@ -831,6 +1776,7 @@ export function useRoom(): UseRoomReturn {
         body: JSON.stringify({
           action: 'dismissInvite',
           email: currentAcc.email,
+          account: currentAcc,
           inviteId,
         }),
       });
@@ -849,6 +1795,7 @@ export function useRoom(): UseRoomReturn {
 
     if (roomRef.current?.code) {
       const code = roomRef.current.code;
+      tasks.push(flushActionQueue());
       tasks.push(
         fetch(`/api/rooms/${encodeURIComponent(code)}`, {
           method: 'POST',
@@ -857,13 +1804,14 @@ export function useRoom(): UseRoomReturn {
           body: JSON.stringify({
             action: 'sync',
             memberId: activeMemberId,
-            fallbackRoom: roomRef.current,
+            includeQuestions: true,
+            fallbackRoom: makeCompactRoom(roomRef.current),
           }),
         })
           .then((r) => (r.ok ? r.json() : null))
           .then((data) => {
             if (data?.room) {
-              applyAndBroadcastRoom(data.room, true);
+              commitRoomState(data.room, { publishMqtt: true });
             }
           })
           .catch(() => {})
@@ -893,7 +1841,7 @@ export function useRoom(): UseRoomReturn {
     }
 
     await Promise.all(tasks);
-  }, [memberId, applyAndBroadcastRoom]);
+  }, [memberId, flushActionQueue, makeCompactRoom, commitRoomState]);
 
   const createRoom = useCallback(
     async (params: {
@@ -904,6 +1852,7 @@ export function useRoom(): UseRoomReturn {
     }): Promise<RoomState | null> => {
       setIsLoading(true);
       setError(null);
+      setWasKicked(false);
       try {
         const activeMemberId = memberId || getOrCreateLocalMemberId();
         if (!memberId) setMemberId(activeMemberId);
@@ -956,6 +1905,7 @@ export function useRoom(): UseRoomReturn {
     }): Promise<RoomState | null> => {
       setIsLoading(true);
       setError(null);
+      setWasKicked(false);
       try {
         const activeMemberId = memberId || getOrCreateLocalMemberId();
         if (!memberId) setMemberId(activeMemberId);
@@ -1021,16 +1971,19 @@ export function useRoom(): UseRoomReturn {
         members: remainingMembers,
         isRevealed:
           departingRoom.status === 'active'
-            ? departingRoom.mode === 'wait'
-              ? allRemainingAnswered
-              : departingRoom.forceRevealedQuestionIndex === qIdx ||
-                allRemainingAnswered
+            ? allRemainingAnswered
             : departingRoom.isRevealed,
         version: departingRoom.version + 1,
         updatedAt: Date.now(),
       };
 
-      publishMqttState(updatedRoom);
+      publishMqttDelta(departingRoom.code, {
+        t: 'kick',
+        id: `kick-${Date.now()}`,
+        target: activeMemberId,
+        ts: Date.now(),
+      });
+      publishMqttState(updatedRoom, false);
       try {
         channelRef.current?.postMessage(updatedRoom);
       } catch {
@@ -1045,9 +1998,15 @@ export function useRoom(): UseRoomReturn {
           action: 'removeMember',
           memberId: activeMemberId,
           targetMemberId: activeMemberId,
-          fallbackRoom: departingRoom,
+          fallbackRoom: makeCompactRoom(departingRoom),
         }),
       }).catch(() => {});
+    }
+
+    if (departingRoom?.code) {
+      actionQueueRef.current = [];
+      saveQueue(departingRoom.code, []);
+      setSyncPendingCount(0);
     }
 
     if (mqttClientRef.current) {
@@ -1058,141 +2017,99 @@ export function useRoom(): UseRoomReturn {
       }
       mqttClientRef.current = null;
     }
-    applyAndBroadcastRoom(null, false);
+    setMqttConnected(false);
+    commitRoomState(null, { publishMqtt: false });
     setError(null);
-  }, [memberId, publishMqttState, applyAndBroadcastRoom]);
-
-  const postRoomAction = useCallback(
-    async (action: string, payload: Record<string, unknown> = {}) => {
-      const currentRoom = roomRef.current;
-      if (!currentRoom?.code) return;
-      const actionSentAt = Date.now();
-      lastLocalMutationAtRef.current = actionSentAt;
-      try {
-        const activeMemberId = memberId || getOrCreateLocalMemberId();
-        const res = await fetch(
-          `/api/rooms/${encodeURIComponent(currentRoom.code)}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              action,
-              memberId: activeMemberId,
-              fallbackRoom: currentRoom,
-              ...payload,
-            }),
-          }
-        );
-        const data = await res.json();
-        if (lastLocalMutationAtRef.current > actionSentAt) {
-          // A newer optimistic mutation occurred while this request was in flight
-          return;
-        }
-        if (res.ok && data?.room) {
-          applyAndBroadcastRoom(data.room, true);
-        } else if (data?.error) {
-          setError(data.error);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Action failed');
-      }
-    },
-    [memberId, applyAndBroadcastRoom]
-  );
+  }, [memberId, publishMqttDelta, publishMqttState, makeCompactRoom, commitRoomState]);
 
   const toggleReady = useCallback(
     async (ready?: boolean) => {
       const currentRoom = roomRef.current;
       const activeMemberId = memberId || getOrCreateLocalMemberId();
-      if (currentRoom && currentRoom.status === 'lobby') {
-        const now = Date.now();
-        lastLocalMutationAtRef.current = now;
-        const updatedMembers = currentRoom.members.map((m) => {
-          if (m.id !== activeMemberId) return m;
-          const nextReady =
-            typeof ready === 'boolean' ? ready : !Boolean(m.isReady);
-          return {
-            ...m,
-            isReady: nextReady,
-            lastSeenAt: now + 1000,
-          };
-        });
-        const allReady =
-          updatedMembers.length >= 2 &&
-          currentRoom.questions.length > 0 &&
-          updatedMembers.every((m) => Boolean(m.isReady));
+      if (!currentRoom || currentRoom.status !== 'lobby') return;
 
-        const optimisticRoom: RoomState = {
-          ...currentRoom,
-          status: allReady ? 'active' : currentRoom.status,
-          currentQuestionIndex: allReady ? 0 : currentRoom.currentQuestionIndex,
-          questionStartedAt: allReady ? now : currentRoom.questionStartedAt,
-          examSessionId: allReady ? now : currentRoom.examSessionId,
-          members: allReady
-            ? updatedMembers.map((m) => ({
-                ...m,
-                isReady: false,
-                readyForNextQuestionIndex: -1,
-                score: 0,
-                streak: 0,
-                bestStreak: 0,
-                correctCount: 0,
-                totalTimeMs: 0,
-                answers: {},
-              }))
-            : updatedMembers,
-          version: (currentRoom.version || 1) + 2,
-          updatedAt: Math.max(now + 1000, (currentRoom.updatedAt || now) + 1),
-        };
-        applyAndBroadcastRoom(optimisticRoom, true);
+      const now = Date.now();
+      lastLocalMutationAtRef.current = now;
+      const myMember = currentRoom.members.find((m) => m.id === activeMemberId);
+      const nextReady =
+        typeof ready === 'boolean' ? ready : !Boolean(myMember?.isReady);
+
+      const delta: RoomDelta = {
+        t: 'ready',
+        id: `rdy-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        m: activeMemberId,
+        r: nextReady,
+        ts: now,
+      };
+      applyDeltaToRoom(delta);
+      publishMqttDelta(currentRoom.code, delta);
+      if (roomRef.current) {
+        publishMqttState(roomRef.current, false);
       }
-
-      await postRoomAction(
-        'toggleReady',
-        typeof ready === 'boolean' ? { ready } : {}
-      );
+      enqueueRoomAction('toggleReady', { ready: nextReady });
     },
-    [memberId, applyAndBroadcastRoom, postRoomAction]
+    [memberId, applyDeltaToRoom, publishMqttDelta, publishMqttState, enqueueRoomAction]
   );
 
   const updateSettings = useCallback(
     async (settings: RoomSettingsUpdate) => {
       const currentRoom = roomRef.current;
-      if (currentRoom) {
-        const now = Date.now();
-        lastLocalMutationAtRef.current = now;
-        const optimisticRoom: RoomState = {
-          ...currentRoom,
-          title:
-            typeof settings.title === 'string' && settings.title.trim()
-              ? settings.title.trim()
-              : currentRoom.title,
-          mode:
-            settings.mode === 'wait' || settings.mode === 'race'
-              ? settings.mode
-              : currentRoom.mode,
-          timePerQuestion:
-            typeof settings.timePerQuestion === 'number'
-              ? settings.timePerQuestion <= 0
-                ? 0
-                : Math.max(5, Math.min(180, settings.timePerQuestion))
-              : currentRoom.timePerQuestion,
-          version: (currentRoom.version || 1) + 2,
-          updatedAt: Math.max(now + 1000, (currentRoom.updatedAt || now) + 1),
-        };
-        applyAndBroadcastRoom(optimisticRoom, true);
-      }
-
-      await postRoomAction('updateSettings', { settings });
+      if (!currentRoom) return;
+      const now = Date.now();
+      lastLocalMutationAtRef.current = now;
+      const optimisticRoom: RoomState = {
+        ...currentRoom,
+        title:
+          typeof settings.title === 'string' && settings.title.trim()
+            ? settings.title.trim()
+            : currentRoom.title,
+        mode:
+          settings.mode === 'wait' || settings.mode === 'race'
+            ? settings.mode
+            : currentRoom.mode,
+        timePerQuestion:
+          typeof settings.timePerQuestion === 'number'
+            ? settings.timePerQuestion <= 0
+              ? 0
+              : Math.max(5, Math.min(180, settings.timePerQuestion))
+            : currentRoom.timePerQuestion,
+        version: (currentRoom.version || 1) + 2,
+        updatedAt: Math.max(now + 1000, (currentRoom.updatedAt || now) + 1),
+      };
+      commitRoomState(optimisticRoom, { publishMqtt: true });
+      enqueueRoomAction('updateSettings', { settings });
     },
-    [applyAndBroadcastRoom, postRoomAction]
+    [commitRoomState, enqueueRoomAction]
   );
 
   const setQuestions = useCallback(
     async (questions: Question[], title?: string) => {
-      await postRoomAction('setQuestions', { questions, title });
+      const currentRoom = roomRef.current;
+      if (!currentRoom) return;
+      const now = Date.now();
+      lastLocalMutationAtRef.current = now;
+      const digest = computeQuestionsDigest(questions);
+      questionsCacheRef.current.set(digest, questions);
+
+      const optimisticRoom: RoomState = {
+        ...currentRoom,
+        questions,
+        questionsDigest: digest,
+        questionsUpdatedAt: now,
+        title: title?.trim() || currentRoom.title,
+        currentQuestionIndex: 0,
+        forceRevealedQuestionIndex: -1,
+        isRevealed: false,
+        version: currentRoom.version + 2,
+        updatedAt: now,
+      };
+      commitRoomState(optimisticRoom, {
+        publishMqtt: true,
+        includeQuestions: true,
+      });
+      enqueueRoomAction('setQuestions', { questions, title });
     },
-    [postRoomAction]
+    [commitRoomState, enqueueRoomAction]
   );
 
   const parseAndSetMarkdown = useCallback(
@@ -1206,6 +2123,21 @@ export function useRoom(): UseRoomReturn {
       setIsLoading(true);
       setError(null);
       try {
+        // Pure local Markdown can be parsed immediately on client without blocking if Gemini isn't used
+        if (
+          !params.useGemini &&
+          (!params.attachments || params.attachments.length === 0) &&
+          params.markdown.trim()
+        ) {
+          const localResult = parseMarkdownQuestions(params.markdown);
+          if (localResult.questions.length > 0) {
+            if (roomRef.current?.code) {
+              await setQuestions(localResult.questions, params.title);
+            }
+            return localResult;
+          }
+        }
+
         const res = await fetch('/api/parse-questions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1257,59 +2189,233 @@ export function useRoom(): UseRoomReturn {
 
   const startExam = useCallback(
     async (modeOverride?: GameMode) => {
-      await postRoomAction(
+      const currentRoom = roomRef.current;
+      if (!currentRoom || currentRoom.questions.length === 0) return;
+      const allReady =
+        currentRoom.members.length > 0 &&
+        currentRoom.members.every((m) => Boolean(m.isReady));
+      if (!allReady) return;
+
+      const now = Date.now();
+      lastLocalMutationAtRef.current = now;
+      const optimisticRoom: RoomState = {
+        ...currentRoom,
+        mode: modeOverride || currentRoom.mode,
+        status: 'active',
+        currentQuestionIndex: 0,
+        questionStartedAt: now,
+        examSessionId: now,
+        forceRevealedQuestionIndex: -1,
+        isRevealed: false,
+        reactions: [],
+        members: currentRoom.members.map((m) => ({
+          ...m,
+          isReady: false,
+          readyForNextQuestionIndex: -1,
+          score: 0,
+          streak: 0,
+          bestStreak: 0,
+          correctCount: 0,
+          totalTimeMs: 0,
+          answers: {},
+        })),
+        version: currentRoom.version + 2,
+        updatedAt: now,
+      };
+      commitRoomState(optimisticRoom, { publishMqtt: true });
+      enqueueRoomAction(
         'startExam',
         modeOverride ? { mode: modeOverride } : {}
       );
     },
-    [postRoomAction]
+    [commitRoomState, enqueueRoomAction]
   );
 
   const submitAnswer = useCallback(
     async (optionIndex: number) => {
-      await postRoomAction('submitAnswer', { optionIndex });
+      const currentRoom = roomRef.current;
+      const activeMemberId = memberId || getOrCreateLocalMemberId();
+      if (!currentRoom || currentRoom.status !== 'active') return;
+
+      const now = Date.now();
+      lastLocalMutationAtRef.current = now;
+      const delta: RoomDelta = {
+        t: 'ans',
+        id: `ans-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        m: activeMemberId,
+        q: currentRoom.currentQuestionIndex,
+        o: optionIndex,
+        ts: now,
+      };
+      applyDeltaToRoom(delta);
+      publishMqttDelta(currentRoom.code, delta);
+      if (roomRef.current) {
+        publishMqttState(roomRef.current, false);
+      }
+      enqueueRoomAction('submitAnswer', { optionIndex });
     },
-    [postRoomAction]
+    [memberId, applyDeltaToRoom, publishMqttDelta, publishMqttState, enqueueRoomAction]
   );
 
   const revealQuestion = useCallback(async () => {
-    await postRoomAction('revealQuestion');
-  }, [postRoomAction]);
+    // Collective reveal only in both Wait and Race modes (no force reveal)
+  }, []);
 
   const nextQuestion = useCallback(async () => {
-    await postRoomAction('nextQuestion');
-  }, [postRoomAction]);
+    const currentRoom = roomRef.current;
+    const activeMemberId = memberId || getOrCreateLocalMemberId();
+    if (!currentRoom || currentRoom.status !== 'active') return;
+
+    const now = Date.now();
+    lastLocalMutationAtRef.current = now;
+    const delta: RoomDelta = {
+      t: 'next',
+      id: `nxt-${now}-${Math.random().toString(36).slice(2, 6)}`,
+      m: activeMemberId,
+      q: currentRoom.currentQuestionIndex,
+      ts: now,
+    };
+    applyDeltaToRoom(delta);
+    publishMqttDelta(currentRoom.code, delta);
+    if (roomRef.current) {
+      publishMqttState(roomRef.current, false);
+    }
+    enqueueRoomAction('nextQuestion', {});
+  }, [memberId, applyDeltaToRoom, publishMqttDelta, publishMqttState, enqueueRoomAction]);
 
   const resetRoom = useCallback(
     async (backToLobby = true) => {
-      await postRoomAction('resetRoom', { backToLobby });
+      const currentRoom = roomRef.current;
+      if (!currentRoom) return;
+      const now = Date.now();
+      lastLocalMutationAtRef.current = now;
+      const optimisticRoom: RoomState = {
+        ...currentRoom,
+        status: backToLobby ? 'lobby' : 'active',
+        currentQuestionIndex: 0,
+        questionStartedAt: now,
+        examSessionId: now,
+        forceRevealedQuestionIndex: -1,
+        isRevealed: false,
+        reactions: [],
+        members: currentRoom.members.map((m) => ({
+          ...m,
+          isReady: false,
+          readyForNextQuestionIndex: -1,
+          score: 0,
+          streak: 0,
+          bestStreak: 0,
+          correctCount: 0,
+          totalTimeMs: 0,
+          answers: {},
+        })),
+        version: currentRoom.version + 2,
+        updatedAt: now,
+      };
+      commitRoomState(optimisticRoom, { publishMqtt: true });
+      enqueueRoomAction('resetRoom', { backToLobby });
     },
-    [postRoomAction]
+    [commitRoomState, enqueueRoomAction]
   );
 
   const sendReaction = useCallback(
     async (input: SendReactionInput | string) => {
+      const currentRoom = roomRef.current;
+      const activeMemberId = memberId || getOrCreateLocalMemberId();
+      if (!currentRoom) return;
+
       const normalized: SendReactionInput =
         typeof input === 'string'
           ? { emoji: input, kind: 'general' }
           : input;
-      await postRoomAction('sendReaction', { reaction: normalized });
+
+      const sender =
+        currentRoom.members.find((m) => m.id === activeMemberId) ||
+        currentRoom.members[0];
+      if (!sender) return;
+
+      const target = normalized.targetMemberId
+        ? currentRoom.members.find((m) => m.id === normalized.targetMemberId)
+        : undefined;
+
+      const now = Date.now();
+      lastLocalMutationAtRef.current = now;
+      const rx: EmojiReaction = {
+        id: `rx-${now}-${Math.random().toString(36).slice(2, 7)}`,
+        senderId: sender.id,
+        senderName: sender.name,
+        senderAvatar: sender.avatar,
+        emoji: normalized.emoji,
+        label: normalized.label,
+        kind: normalized.kind || 'general',
+        targetMemberId: target?.id,
+        targetMemberName: target?.name,
+        targetMemberAvatar: target?.avatar,
+        questionIndex:
+          normalized.questionIndex !== undefined
+            ? normalized.questionIndex
+            : currentRoom.currentQuestionIndex,
+        createdAt: now,
+      };
+
+      const delta: RoomDelta = {
+        t: 'rx',
+        id: rx.id,
+        m: sender.id,
+        rx,
+        ts: now,
+      };
+      applyDeltaToRoom(delta);
+      setNowTick(now);
+      publishMqttDelta(currentRoom.code, delta);
+      enqueueRoomAction('sendReaction', { reaction: normalized });
     },
-    [postRoomAction]
+    [memberId, applyDeltaToRoom, publishMqttDelta, enqueueRoomAction]
   );
 
   const setStatusBadge = useCallback(
     async (badge: string | null) => {
-      await postRoomAction('setStatusBadge', { badge });
+      const currentRoom = roomRef.current;
+      const activeMemberId = memberId || getOrCreateLocalMemberId();
+      if (!currentRoom) return;
+
+      const now = Date.now();
+      lastLocalMutationAtRef.current = now;
+      const delta: RoomDelta = {
+        t: 'badge',
+        id: `bdg-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        m: activeMemberId,
+        b: badge,
+        ts: now,
+      };
+      applyDeltaToRoom(delta);
+      publishMqttDelta(currentRoom.code, delta);
+      enqueueRoomAction('setStatusBadge', { badge });
     },
-    [postRoomAction]
+    [memberId, applyDeltaToRoom, publishMqttDelta, enqueueRoomAction]
   );
 
   const removeMember = useCallback(
     async (targetMemberId: string) => {
-      await postRoomAction('removeMember', { targetMemberId });
+      const currentRoom = roomRef.current;
+      if (!currentRoom || !targetMemberId) return;
+      const now = Date.now();
+      lastLocalMutationAtRef.current = now;
+
+      const delta: RoomDelta = {
+        t: 'kick',
+        id: `kck-${now}-${Math.random().toString(36).slice(2, 6)}`,
+        target: targetMemberId,
+        ts: now,
+      };
+      applyDeltaToRoom(delta);
+      publishMqttDelta(currentRoom.code, delta);
+      if (roomRef.current) {
+        publishMqttState(roomRef.current, false);
+      }
+      enqueueRoomAction('removeMember', { targetMemberId });
     },
-    [postRoomAction]
+    [applyDeltaToRoom, publishMqttDelta, publishMqttState, enqueueRoomAction]
   );
 
   const updateMemberProfile = useCallback(
@@ -1322,12 +2428,15 @@ export function useRoom(): UseRoomReturn {
       setError(null);
       const nextName = params.name?.trim();
       const nextAvatar = params.avatar?.trim();
+      const nextUsername = params.username
+        ?.trim()
+        .replace(/^@+/, '')
+        .toLowerCase();
 
       if (typeof params.geminiApiKey === 'string') {
         setGeminiApiKey(params.geminiApiKey);
       }
 
-      // Persist local profile preference
       if (typeof window !== 'undefined' && (nextName || nextAvatar)) {
         try {
           const prevRaw = window.localStorage.getItem(STORAGE_PROFILE_KEY);
@@ -1337,6 +2446,7 @@ export function useRoom(): UseRoomReturn {
             JSON.stringify({
               name: nextName || prev.name || '',
               avatar: nextAvatar || prev.avatar || '🐥',
+              custom: true,
             })
           );
           window.dispatchEvent(
@@ -1349,7 +2459,34 @@ export function useRoom(): UseRoomReturn {
         }
       }
 
-      // Update Google account on server if logged in
+      // Immediately update active room member in 0ms (works for both Guests and Signed-in users)
+      const currentRoom = roomRef.current;
+      const activeMemberId = memberId || getOrCreateLocalMemberId();
+      if (currentRoom?.code && (nextName || nextAvatar || nextUsername)) {
+        const now = Date.now();
+        lastLocalMutationAtRef.current = now;
+        const delta: RoomDelta = {
+          t: 'prof',
+          id: `prf-${now}-${Math.random().toString(36).slice(2, 6)}`,
+          m: activeMemberId,
+          name: nextName,
+          avatar: nextAvatar,
+          username: nextUsername,
+          ts: now,
+        };
+        applyDeltaToRoom(delta);
+        publishMqttDelta(currentRoom.code, delta);
+        if (roomRef.current) {
+          publishMqttState(roomRef.current, false);
+        }
+        enqueueRoomAction('updateProfile', {
+          name: nextName,
+          avatar: nextAvatar,
+          username: nextUsername,
+        });
+      }
+
+      // Persist to Google account on server if signed in
       const currentAcc = accountRef.current;
       if (currentAcc) {
         try {
@@ -1377,20 +2514,17 @@ export function useRoom(): UseRoomReturn {
           setError(
             err instanceof Error ? err.message : 'Failed to update profile'
           );
-          return;
         }
       }
-
-      // Update active room member if inside a room
-      if (roomRef.current?.code) {
-        await postRoomAction('updateProfile', {
-          name: nextName,
-          avatar: nextAvatar,
-          username: params.username?.trim().replace(/^@+/, '').toLowerCase(),
-        });
-      }
     },
-    [postRoomAction, setGeminiApiKey]
+    [
+      memberId,
+      setGeminiApiKey,
+      applyDeltaToRoom,
+      publishMqttDelta,
+      publishMqttState,
+      enqueueRoomAction,
+    ]
   );
 
   // Derived states
@@ -1405,6 +2539,35 @@ export function useRoom(): UseRoomReturn {
     if (!room || !me) return false;
     return room.hostId === me.id || me.isHost;
   }, [room, me]);
+
+  const memberConnectionStatus = useMemo<Record<string, ConnectionStatus>>(() => {
+    const map: Record<string, ConnectionStatus> = {};
+    if (!room) return map;
+    const now = presenceTick;
+
+    for (const m of room.members) {
+      if (me && m.id === me.id) {
+        map[m.id] = isLocalOffline ? 'offline' : 'online';
+        continue;
+      }
+      const explicit = peerExplicitStatusRef.current[m.id];
+      const lastSeen = Math.max(
+        peerLastSeenRef.current[m.id] || 0,
+        m.lastSeenAt || 0
+      );
+      const age = now - lastSeen;
+      if (explicit === 'offline' && lastSeen <= (peerLastSeenRef.current[m.id] || 0)) {
+        map[m.id] = 'offline';
+      } else if (age > 25000) {
+        map[m.id] = 'offline';
+      } else if (age > 10000) {
+        map[m.id] = 'weak';
+      } else {
+        map[m.id] = 'online';
+      }
+    }
+    return map;
+  }, [room, me, isLocalOffline, presenceTick]);
 
   const allMembersReady = useMemo<boolean>(() => {
     if (!room || room.members.length === 0) return false;
@@ -1447,6 +2610,8 @@ export function useRoom(): UseRoomReturn {
     return me.answers[room.currentQuestionIndex] || null;
   }, [room, me]);
 
+  // Collective anti-spoiler reveal for BOTH 'wait' AND 'race' modes:
+  // Neither mode reveals answers or peer tags until every member has answered!
   const isAnswerRevealedToMe = useMemo<boolean>(() => {
     if (!room) return false;
     if (room.status === 'finished') return true;
@@ -1455,13 +2620,8 @@ export function useRoom(): UseRoomReturn {
       room.members.length > 0 &&
       room.members.every((m) => m.answers[qIdx] !== undefined);
 
-    if (room.mode === 'wait') {
-      return allMembersAnswered;
-    }
-
-    const isForceRevealed = room.forceRevealedQuestionIndex === qIdx;
-    return myCurrentAnswer !== null || isForceRevealed || allMembersAnswered;
-  }, [room, myCurrentAnswer]);
+    return allMembersAnswered;
+  }, [room]);
 
   const optionTags = useMemo<Record<number, MemberAnswerTag[]>>(() => {
     const map: Record<number, MemberAnswerTag[]> = { 0: [], 1: [], 2: [], 3: [] };
@@ -1486,9 +2646,8 @@ export function useRoom(): UseRoomReturn {
       if (!ans) return;
       const isMe = me ? m.id === me.id : false;
 
-      const canSeeTag =
-        room.mode === 'race' || isAnswerRevealedToMe || isMe;
-
+      // Never show another member's tag on an option before everyone answers!
+      const canSeeTag = isAnswerRevealedToMe || isMe;
       if (!canSeeTag) return;
 
       if (!map[ans.optionIndex]) {
@@ -1566,6 +2725,14 @@ export function useRoom(): UseRoomReturn {
     isLoading,
     error,
     clearError,
+    isLocalOffline,
+    mqttConnected,
+    syncPendingCount,
+    wasKicked,
+    clearKickedNotice,
+    memberConnectionStatus,
+    notificationPermission,
+    requestNotificationPermission,
     allMembersReady,
     readyCount,
     myReadyForNext,

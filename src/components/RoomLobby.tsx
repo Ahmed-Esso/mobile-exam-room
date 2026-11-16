@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import dynamic from 'next/dynamic';
 import {
   Check,
   Copy,
@@ -18,15 +19,17 @@ import {
   SlidersHorizontal,
   Timer,
   Users,
+  WifiOff,
   X,
   Zap,
 } from 'lucide-react';
-import type { GameMode, UseRoomReturn } from '@/types/exam';
+import type { ConnectionStatus, GameMode, UseRoomReturn } from '@/types/exam';
 import { Avatar, copyText, haptic } from './ui';
 import AnimalAvatarArt from './AnimalAvatarArt';
-import MarkdownQuestionModal from './MarkdownQuestionModal';
-import ProfileEditSheet from './ProfileEditSheet';
 import { InstallAppButton } from './InstallAppSheet';
+
+const MarkdownQuestionModal = dynamic(() => import('./MarkdownQuestionModal'), { ssr: false });
+const ProfileEditSheet = dynamic(() => import('./ProfileEditSheet'), { ssr: false });
 
 const TIMES = [0, 15, 30, 45, 60, 90];
 
@@ -120,6 +123,24 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="scroll-area">
         <div className="pt-safe px-4 pb-4">
+          {api.isLocalOffline || api.syncPendingCount > 0 ? (
+            <div
+              className="mb-2 flex items-center justify-center gap-1.5 rounded-xl px-2.5 py-1 text-[11px] font-semibold"
+              style={{
+                background: api.isLocalOffline
+                  ? 'rgba(255, 106, 85, 0.16)'
+                  : 'rgba(255, 176, 46, 0.16)',
+                color: api.isLocalOffline ? 'var(--coral)' : 'var(--amber)',
+              }}
+              role="status"
+            >
+              <WifiOff size={12} />
+              {api.isLocalOffline
+                ? 'Offline — changes queued, reconnecting…'
+                : `Syncing (${api.syncPendingCount})…`}
+            </div>
+          ) : null}
+
           {/* Top bar */}
           <header className="flex items-center justify-between gap-2 pt-1">
             <button
@@ -215,31 +236,51 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
             <ul className="mt-2.5 grid grid-cols-4 gap-x-2 gap-y-2.5">
               {room.members.map((m, i) => {
                 const mReady = Boolean(m.isReady);
+                const conn: ConnectionStatus =
+                  api.memberConnectionStatus[m.id] ?? m.connectionStatus ?? 'online';
                 return (
                   <li
                     key={m.id}
                     className="pop relative flex flex-col items-center gap-1"
                     style={{ animationDelay: `${i * 30}ms` }}
                   >
-                    <Avatar
-                      emoji={m.avatar}
-                      size={38}
-                      host={m.id === room.hostId}
-                      badge={m.statusBadge}
-                      ring={
-                        hasQuestions
-                          ? mReady
-                            ? 'correct'
-                            : 'thinking'
-                          : m.id === me?.id
-                          ? 'me'
-                          : 'none'
-                      }
-                    />
+                    <span className="relative inline-flex">
+                      <Avatar
+                        emoji={m.avatar}
+                        size={38}
+                        host={m.id === room.hostId}
+                        badge={m.statusBadge}
+                        ring={
+                          hasQuestions
+                            ? mReady
+                              ? 'correct'
+                              : 'thinking'
+                            : m.id === me?.id
+                            ? 'me'
+                            : 'none'
+                        }
+                      />
+                      <span
+                        className="absolute -left-0.5 -top-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-[var(--surface)]"
+                        style={{
+                          background:
+                            conn === 'offline'
+                              ? 'var(--coral)'
+                              : conn === 'weak'
+                              ? 'var(--amber)'
+                              : 'var(--lime)',
+                        }}
+                        title={conn}
+                      />
+                    </span>
                     <span className="w-full truncate text-center text-[11px] font-semibold">
                       {m.id === me?.id ? 'You' : m.name}
                     </span>
-                    {hasQuestions ? (
+                    {conn === 'offline' ? (
+                      <span className="-mt-0.5 inline-flex items-center rounded-full bg-[rgba(255,106,85,0.16)] px-1.5 py-0.5 text-[9px] font-bold text-[var(--coral)]">
+                        Offline
+                      </span>
+                    ) : hasQuestions ? (
                       <span
                         className="-mt-0.5 inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-bold"
                         style={{

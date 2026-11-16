@@ -8,8 +8,10 @@ import {
   ChevronDown,
   Clock,
   Crown,
+  FileDown,
   Flame,
   Home,
+  Loader2,
   RotateCcw,
   Share2,
   Sparkles,
@@ -26,6 +28,8 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
   const [filter, setFilter] = useState<'all' | 'missed'>('all');
   const [openQuestions, setOpenQuestions] = useState<Record<number, boolean>>({ 0: true });
   const [copiedSummary, setCopiedSummary] = useState(false);
+  const [exportingMode, setExportingMode] = useState<'missed' | 'all' | null>(null);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
 
   // Fire celebration confetti when podium mounts
   useEffect(() => {
@@ -107,6 +111,38 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
           order: orderIdx + 1,
         };
       });
+  };
+
+  const missedCount = room.questions.filter(
+    (_, qIdx) => !me?.answers[qIdx] || !me.answers[qIdx].isCorrect
+  ).length;
+
+  const handleExportPdf = async (mode: 'missed' | 'all') => {
+    if (!me || exportingMode) return;
+    haptic(8);
+    setExportingMode(mode);
+    setExportStatus(null);
+    try {
+      const { exportQuestionsPdf } = await import('@/lib/export-pdf');
+      const res = await exportQuestionsPdf({
+        title: room.title,
+        roomCode: room.code,
+        playerName: me.name,
+        score: me.score,
+        correctCount: me.correctCount,
+        totalCount: room.questions.length,
+        questions: room.questions,
+        answers: me.answers,
+        mode,
+      });
+      setExportStatus(`Saved ${res.exportedCount} questions (${res.filename})`);
+    } catch (err) {
+      setExportStatus(
+        err instanceof Error ? err.message : 'Could not export PDF on this browser.'
+      );
+    } finally {
+      setExportingMode(null);
+    }
   };
 
   return (
@@ -352,6 +388,43 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
               </button>
             </div>
 
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={exportingMode !== null || missedCount === 0}
+                onClick={() => void handleExportPdf('missed')}
+                className="btn-primary !min-h-[38px] !rounded-xl !px-3 text-xs"
+              >
+                {exportingMode === 'missed' ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <FileDown size={14} />
+                )}
+                {missedCount === 0
+                  ? 'No Missed Questions!'
+                  : `Missed Questions PDF (${missedCount})`}
+              </button>
+              <button
+                type="button"
+                disabled={exportingMode !== null}
+                onClick={() => void handleExportPdf('all')}
+                className="btn-secondary !min-h-[38px] !rounded-xl !px-3 text-xs"
+              >
+                {exportingMode === 'all' ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <FileDown size={14} />
+                )}
+                All PDF
+              </button>
+            </div>
+
+            {exportStatus ? (
+              <p className="mt-2 px-1 text-xs font-medium text-[var(--lime)]" role="status">
+                {exportStatus}
+              </p>
+            ) : null}
+
             <div className="mt-3 flex gap-2">
               <button
                 type="button"
@@ -388,7 +461,7 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
                 return (
                   <article
                     key={q.id || qIdx}
-                    className="panel overflow-hidden"
+                    className="panel review-item overflow-hidden"
                   >
                     <button
                       type="button"

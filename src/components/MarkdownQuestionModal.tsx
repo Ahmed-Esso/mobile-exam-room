@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -67,6 +67,7 @@ export default function MarkdownQuestionModal({
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [showAllPreview, setShowAllPreview] = useState(false);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const mdFileRef = useRef<HTMLInputElement>(null);
@@ -75,6 +76,7 @@ export default function MarkdownQuestionModal({
   useEffect(() => {
     if (!open) return;
     setResult(null);
+    setShowAllPreview(false);
     if (api.geminiApiKey) {
       setApiKey(api.geminiApiKey);
       return;
@@ -91,10 +93,12 @@ export default function MarkdownQuestionModal({
     return () => window.clearTimeout(t);
   }, [markdown]);
 
+  const deferredMarkdown = useDeferredValue(debounced);
+
   const preview = useMemo(() => {
-    if (!debounced.trim()) return null;
+    if (!deferredMarkdown.trim()) return null;
     try {
-      return parseMarkdownQuestions(debounced);
+      return parseMarkdownQuestions(deferredMarkdown);
     } catch {
       return {
         questions: [],
@@ -102,7 +106,7 @@ export default function MarkdownQuestionModal({
         warnings: ['Could not parse this Markdown.'],
       };
     }
-  }, [debounced]);
+  }, [deferredMarkdown]);
 
   const hasApiKey = apiKey.trim().length > 0;
   const count = preview?.questions.length ?? 0;
@@ -415,14 +419,24 @@ export default function MarkdownQuestionModal({
                   </button>
 
                   {preview.warnings?.length ? (
-                    <p className="border-t border-[var(--line)] px-3 py-2 text-[11px] text-[var(--amber)]">
-                      {preview.warnings[0]}
-                    </p>
+                    <div className="space-y-1 border-t border-[var(--line)] px-3 py-2 text-[11px] text-[var(--amber)]">
+                      {preview.warnings.slice(0, 3).map((w, wi) => (
+                        <p key={wi} className="flex items-start gap-1.5">
+                          <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+                          <span>{w}</span>
+                        </p>
+                      ))}
+                      {preview.warnings.length > 3 ? (
+                        <p className="text-[10px] opacity-80">
+                          +{preview.warnings.length - 3} more parser warnings
+                        </p>
+                      ) : null}
+                    </div>
                   ) : null}
 
                   {previewOpen && count > 0 ? (
                     <div className="space-y-1.5 border-t border-[var(--line)] p-2">
-                      {preview.questions.map((q, i) => {
+                      {(showAllPreview ? preview.questions : preview.questions.slice(0, 25)).map((q, i) => {
                         const isOpen = expanded === i;
                         return (
                           <div
@@ -464,6 +478,17 @@ export default function MarkdownQuestionModal({
                           </div>
                         );
                       })}
+                      {preview.questions.length > 25 ? (
+                        <button
+                          type="button"
+                          onClick={() => setShowAllPreview((v) => !v)}
+                          className="btn-secondary !min-h-[34px] w-full !rounded-xl text-xs"
+                        >
+                          {showAllPreview
+                            ? 'Show first 25 questions'
+                            : `Show all ${preview.questions.length} questions`}
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>

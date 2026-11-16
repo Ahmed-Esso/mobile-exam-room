@@ -2,6 +2,8 @@ export type GameMode = 'wait' | 'race';
 
 export type RoomStatus = 'lobby' | 'active' | 'finished';
 
+export type ConnectionStatus = 'online' | 'weak' | 'offline';
+
 export type ReactionKind =
   | 'general'
   | 'contextual-wrong-right'
@@ -52,6 +54,7 @@ export interface Member {
   isReady?: boolean;
   /** Mutual Next Question gate: questionIndex this member has pressed Next on (-1 if none) */
   readyForNextQuestionIndex?: number;
+  connectionStatus?: ConnectionStatus;
   score: number;
   streak: number;
   bestStreak: number;
@@ -111,6 +114,7 @@ export interface RoomState {
   examSessionId?: number;
   forceRevealedQuestionIndex?: number;
   questionsUpdatedAt?: number;
+  questionsDigest?: string;
   kickedMemberIds?: string[];
   isRevealed: boolean;
   questions: Question[];
@@ -120,6 +124,29 @@ export interface RoomState {
   createdAt: number;
   updatedAt: number;
 }
+
+export type CompactRoomState = Omit<RoomState, 'questions'> & {
+  questionCount: number;
+  questionsDigest: string;
+};
+
+export type RoomDelta =
+  | { t: 'ready'; id: string; m: string; r: boolean; ts: number }
+  | { t: 'ans'; id: string; m: string; q: number; o: number; ts: number }
+  | { t: 'next'; id: string; m: string; q: number; ts: number }
+  | { t: 'rx'; id: string; m: string; rx: EmojiReaction; ts: number }
+  | { t: 'badge'; id: string; m: string; b: string | null; ts: number }
+  | {
+      t: 'prof';
+      id: string;
+      m: string;
+      name?: string;
+      avatar?: string;
+      username?: string;
+      ts: number;
+    }
+  | { t: 'kick'; id: string; target: string; ts: number }
+  | { t: 'hb'; m: string; status: ConnectionStatus; ts: number };
 
 export interface ContextualReactionPreset {
   id: string;
@@ -208,6 +235,16 @@ export interface UseRoomReturn {
   error: string | null;
   /** Clear current error */
   clearError: () => void;
+
+  // Weak-internet & Presence helpers
+  isLocalOffline: boolean;
+  mqttConnected: boolean;
+  syncPendingCount: number;
+  wasKicked: boolean;
+  clearKickedNotice: () => void;
+  memberConnectionStatus: Record<string, ConnectionStatus>;
+  notificationPermission: NotificationPermission | 'unsupported';
+  requestNotificationPermission: () => Promise<NotificationPermission | 'unsupported'>;
 
   // Mutual Ready & Mutual Next Gate helpers
   allMembersReady: boolean;
@@ -319,6 +356,33 @@ export const ZOOM_REACTIONS: string[] = [
   '💀',
   '😭',
   '🫡',
+];
+
+export const EMOJI_LIBRARY: string[] = [
+  '🐥',
+  '😜',
+  '😂',
+  '🔥',
+  '👏',
+  '❤️',
+  '🎉',
+  '🤔',
+  '💀',
+  '😭',
+  '🫡',
+  '🧠',
+  '⚡',
+  '👀',
+  '🤝',
+  '😤',
+  '🥳',
+  '💯',
+  '👑',
+  '🤯',
+  '😎',
+  '🫣',
+  '🫠',
+  '🙌',
 ];
 
 export const STATUS_BADGES: { emoji: string; label: string }[] = [

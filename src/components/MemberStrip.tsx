@@ -1,6 +1,6 @@
 'use client';
 
-import type { Member, RoomState } from '@/types/exam';
+import type { ConnectionStatus, Member, RoomState } from '@/types/exam';
 import { Avatar, type AvatarRing } from './ui';
 
 export default function MemberStrip({
@@ -8,11 +8,15 @@ export default function MemberStrip({
   leaderboard,
   meId,
   revealedToMe,
+  memberConnectionStatus = {},
+  onOpenPlayers,
 }: {
   room: RoomState;
   leaderboard: Member[];
   meId: string | null;
   revealedToMe: boolean;
+  memberConnectionStatus?: Record<string, ConnectionStatus>;
+  onOpenPlayers?: () => void;
 }) {
   const qIdx = room.currentQuestionIndex;
 
@@ -26,6 +30,7 @@ export default function MemberStrip({
         const ans = m.answers[qIdx];
         const isMe = m.id === meId;
         const showResult = !!ans && revealedToMe;
+        const conn: ConnectionStatus = memberConnectionStatus[m.id] ?? m.connectionStatus ?? 'online';
         let ring: AvatarRing = 'thinking';
         let status: React.ReactNode;
 
@@ -58,26 +63,72 @@ export default function MemberStrip({
           );
         }
 
+        const pillStyle = {
+          background: isMe ? 'rgba(243, 241, 234, 0.08)' : 'var(--surface)',
+        };
+
+        const inner = (
+          <>
+            <span className="relative inline-flex shrink-0">
+              <Avatar emoji={m.avatar} size={22} ring={ring} badge={m.statusBadge} />
+              <span
+                className="absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-[var(--ink)]"
+                style={{
+                  background:
+                    conn === 'offline'
+                      ? 'var(--coral)'
+                      : conn === 'weak'
+                      ? 'var(--amber)'
+                      : 'var(--lime)',
+                }}
+                aria-label={conn}
+              />
+            </span>
+            <span className="max-w-[72px] truncate font-semibold">
+              {isMe ? 'You' : m.name}
+            </span>
+            {conn === 'offline' ? (
+              <span className="rounded bg-[rgba(255,106,85,0.18)] px-1 text-[9px] font-bold text-[var(--coral)]">
+                Offline
+              </span>
+            ) : (
+              <>
+                {m.streak >= 2 ? (
+                  <span className="text-[10px] font-bold text-[var(--amber)] tabular">
+                    🔥{m.streak}
+                  </span>
+                ) : null}
+                {status}
+              </>
+            )}
+          </>
+        );
+
+        if (onOpenPlayers) {
+          return (
+            <button
+              key={m.id}
+              type="button"
+              role="listitem"
+              onClick={onOpenPlayers}
+              className="press inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs shadow-[0_0_0_1px_var(--line)]"
+              style={pillStyle}
+              aria-label={`${isMe ? 'You' : m.name}, ${conn}, rank ${rank + 1}, ${m.score} points. Tap to view players`}
+            >
+              {inner}
+            </button>
+          );
+        }
+
         return (
           <div
             key={m.id}
             role="listitem"
             className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-xs shadow-[0_0_0_1px_var(--line)]"
-            style={{
-              background: isMe ? 'rgba(243, 241, 234, 0.08)' : 'var(--surface)',
-            }}
-            aria-label={`${isMe ? 'You' : m.name}, rank ${rank + 1}, ${m.score} points`}
+            style={pillStyle}
+            aria-label={`${isMe ? 'You' : m.name}, ${conn}, rank ${rank + 1}, ${m.score} points`}
           >
-            <Avatar emoji={m.avatar} size={22} ring={ring} badge={m.statusBadge} />
-            <span className="max-w-[72px] truncate font-semibold">
-              {isMe ? 'You' : m.name}
-            </span>
-            {m.streak >= 2 ? (
-              <span className="text-[10px] font-bold text-[var(--amber)] tabular">
-                🔥{m.streak}
-              </span>
-            ) : null}
-            {status}
+            {inner}
           </div>
         );
       })}
