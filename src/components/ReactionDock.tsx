@@ -7,9 +7,11 @@ import { emitLocalReaction } from './EmojiReactionOverlay';
 import {
   CUSTOM_REACTIONS_EVENT,
   DEFAULT_CUSTOM_REACTIONS,
+  extractEmojiGraphemes,
   readCustomReactions,
   saveCustomReactions,
 } from './profile';
+import { playReactionSound, playTapSound } from '@/lib/sound-fx';
 import { haptic } from './ui';
 
 const LABELS: Record<string, string> = {
@@ -71,12 +73,14 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
     if (now - lastSent.current < 220) return;
     lastSent.current = now;
     haptic(7);
+    playReactionSound();
     emitLocalReaction({ emoji, kind: 'general' });
     void api.sendReaction({ emoji, kind: 'general' });
   };
 
   const setBadge = (next: string | null) => {
     haptic(next ? [8, 30, 8] : 6);
+    playTapSound();
     setStatusOpen(false);
     if (next) emitLocalReaction({ emoji: next, kind: 'status', label: 'Status' });
     void api.setStatusBadge(next);
@@ -86,16 +90,18 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
     haptic(5);
     const exists = reactions.includes(emoji);
     if (exists && reactions.length <= 1) return;
+    playTapSound();
     const next = exists ? reactions.filter((r) => r !== emoji) : [...reactions, emoji];
     setReactions(saveCustomReactions(next));
   };
 
   const handleAddCustomEmoji = (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = customEmojiInput.trim();
-    if (!cleaned) return;
+    const graphemes = extractEmojiGraphemes(customEmojiInput);
+    if (graphemes.length === 0) return;
     haptic(6);
-    setReactions(saveCustomReactions([...reactions, cleaned]));
+    playTapSound();
+    setReactions(saveCustomReactions([...reactions, ...graphemes]));
     setCustomEmojiInput('');
   };
 
@@ -166,7 +172,7 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
             </button>
           </div>
           <div className="grid grid-cols-6 gap-1.5">
-            {EMOJI_LIBRARY.map((emoji) => {
+            {Array.from(new Set([...EMOJI_LIBRARY, ...reactions])).map((emoji) => {
               const active = reactions.includes(emoji);
               return (
                 <button
@@ -190,22 +196,28 @@ export default function ReactionDock({ api, leading }: { api: UseRoomReturn; lea
               );
             })}
           </div>
-          <form onSubmit={handleAddCustomEmoji} className="mt-2.5 flex gap-1.5">
-            <input
-              type="text"
-              value={customEmojiInput}
-              onChange={(e) => setCustomEmojiInput(e.target.value)}
-              placeholder="Paste emoji (e.g. 🐐)"
-              maxLength={8}
-              className="field !min-h-[34px] flex-1 !rounded-xl px-2.5 text-xs"
-            />
-            <button
-              type="submit"
-              disabled={!customEmojiInput.trim()}
-              className="btn-primary !min-h-[34px] shrink-0 !rounded-xl !px-2.5 text-xs"
-            >
-              <Plus size={14} /> Add
-            </button>
+          <form onSubmit={handleAddCustomEmoji} className="mt-2.5">
+            <label htmlFor="dock-custom-emoji" className="mb-1 block text-[11px] font-semibold text-[var(--muted)]">
+              Add from your keyboard
+            </label>
+            <div className="flex gap-1.5">
+              <input
+                id="dock-custom-emoji"
+                type="text"
+                value={customEmojiInput}
+                onChange={(e) => setCustomEmojiInput(e.target.value)}
+                placeholder="Tap here & pick any emoji from keyboard"
+                maxLength={24}
+                className="field !min-h-[34px] flex-1 !rounded-xl px-2.5 text-xs"
+              />
+              <button
+                type="submit"
+                disabled={extractEmojiGraphemes(customEmojiInput).length === 0}
+                className="btn-primary !min-h-[34px] shrink-0 !rounded-xl !px-2.5 text-xs"
+              >
+                <Plus size={14} /> Add
+              </button>
+            </div>
           </form>
         </div>
       ) : null}

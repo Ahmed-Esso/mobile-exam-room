@@ -24,6 +24,7 @@ import {
   Zap,
 } from 'lucide-react';
 import type { ConnectionStatus, GameMode, UseRoomReturn } from '@/types/exam';
+import { playExamStartSound, playLockSound, playTapSound } from '@/lib/sound-fx';
 import { Avatar, copyText, haptic } from './ui';
 import AnimalAvatarArt from './AnimalAvatarArt';
 import { InstallAppButton } from './InstallAppSheet';
@@ -93,6 +94,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
   const handleToggleReady = async () => {
     if (!hasQuestions) return;
     haptic([10, 35, 10]);
+    playLockSound();
     await api.toggleReady(!me?.isReady);
   };
 
@@ -100,6 +102,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
     if (!hasQuestions || !allMembersReady) return;
     setStarting(true);
     haptic([12, 40, 20]);
+    playExamStartSound();
     await api.startExam();
     setStarting(false);
   };
@@ -417,6 +420,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                     onClick={() => {
                       if (active) return;
                       haptic(10);
+                      playTapSound();
                       void api.updateSettings({ mode: m.id });
                     }}
                     className="press relative flex items-center gap-2 rounded-2xl p-2.5 text-left disabled:cursor-default"
@@ -471,6 +475,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                   disabled={!isHost}
                   onClick={() => {
                     haptic(5);
+                    playTapSound();
                     void api.updateSettings({ timePerQuestion: t });
                   }}
                 >

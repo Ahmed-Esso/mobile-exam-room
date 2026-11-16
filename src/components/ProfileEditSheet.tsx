@@ -9,11 +9,14 @@ import {
   KeyRound,
   Loader2,
   Lock,
+  Plus,
   RotateCcw,
   SlidersHorizontal,
   SmilePlus,
   Sparkles,
   User,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import { AVATAR_OPTIONS, EMOJI_LIBRARY, type UseRoomReturn } from '@/types/exam';
 import AnimalAvatarArt, { animalLabel } from './AnimalAvatarArt';
@@ -23,6 +26,7 @@ import {
   DEFAULT_CUSTOM_REACTIONS,
   DEFAULT_LAYOUT,
   autoName,
+  extractEmojiGraphemes,
   readCustomReactions,
   readLayout,
   readProfile,
@@ -32,7 +36,14 @@ import {
   type LayoutPreferences,
   type LayoutScale,
 } from './profile';
-import { Avatar, Sheet, haptic } from './ui';
+import {
+  SOUND_EVENT,
+  isSoundEnabled,
+  playNotificationSound,
+  playTapSound,
+  setSoundEnabled,
+} from '@/lib/sound-fx';
+import { Avatar, Sheet, Toggle, haptic } from './ui';
 
 export default function ProfileEditSheet({
   open,
@@ -60,6 +71,8 @@ export default function ProfileEditSheet({
   const [savedNotice, setSavedNotice] = useState(false);
   const [layout, setLayout] = useState<LayoutPreferences>(DEFAULT_LAYOUT);
   const [customReactions, setCustomReactions] = useState<string[]>(DEFAULT_CUSTOM_REACTIONS);
+  const [customEmojiInput, setCustomEmojiInput] = useState('');
+  const [soundOn, setSoundOn] = useState(true);
   const wasOpenRef = useRef(false);
 
   useEffect(() => {
@@ -67,8 +80,16 @@ export default function ProfileEditSheet({
       const detail = (e as CustomEvent<string[]>).detail;
       if (Array.isArray(detail) && detail.length > 0) setCustomReactions(detail);
     };
+    const onSound = (e: Event) => {
+      const detail = (e as CustomEvent<boolean>).detail;
+      if (typeof detail === 'boolean') setSoundOn(detail);
+    };
     window.addEventListener(CUSTOM_REACTIONS_EVENT, onCustom);
-    return () => window.removeEventListener(CUSTOM_REACTIONS_EVENT, onCustom);
+    window.addEventListener(SOUND_EVENT, onSound);
+    return () => {
+      window.removeEventListener(CUSTOM_REACTIONS_EVENT, onCustom);
+      window.removeEventListener(SOUND_EVENT, onSound);
+    };
   }, []);
 
   useEffect(() => {
@@ -79,6 +100,8 @@ export default function ProfileEditSheet({
     setShowKey(false);
     setLayout(readLayout());
     setCustomReactions(readCustomReactions());
+    setSoundOn(isSoundEnabled());
+    setCustomEmojiInput('');
     const localProf = readProfile();
     const resolvedAvatar =
       initialAvatar || me?.avatar || account?.avatar || localProf?.avatar || AVATAR_OPTIONS[0];
@@ -383,6 +406,51 @@ export default function ProfileEditSheet({
           </div>
         </div>
 
+        {/* Sound Effects Toggle */}
+        <div className="rounded-2xl bg-[var(--surface)] p-3.5 shadow-[0_0_0_1px_var(--line)]">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl"
+                style={{
+                  background: soundOn ? 'rgba(215, 255, 63, 0.14)' : 'var(--surface-2)',
+                  color: soundOn ? 'var(--lime)' : 'var(--muted)',
+                }}
+              >
+                {soundOn ? <Volume2 size={16} /> : <VolumeX size={16} />}
+              </span>
+              <div className="min-w-0">
+                <p className="text-sm font-bold text-[var(--paper)]">App &amp; Notification Sounds</p>
+                <p className="text-[11px] text-[var(--muted)]">
+                  Tactile chimes for answers, reactions &amp; invites
+                </p>
+              </div>
+            </div>
+            <Toggle
+              checked={soundOn}
+              onChange={(next) => {
+                haptic(6);
+                setSoundOn(setSoundEnabled(next));
+              }}
+              label="App and notification sounds"
+            />
+          </div>
+          {soundOn ? (
+            <div className="mt-2.5 flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  haptic(6);
+                  playNotificationSound();
+                }}
+                className="chip !h-7 !min-h-0 !px-2.5 text-[11px]"
+              >
+                <Volume2 size={11} /> Test sound
+              </button>
+            </div>
+          ) : null}
+        </div>
+
         {/* Reaction Bar Emojis */}
         <div className="rounded-2xl bg-[var(--surface)] p-3.5 shadow-[0_0_0_1px_var(--line)]">
           <div className="flex items-center justify-between gap-2">
@@ -394,6 +462,7 @@ export default function ProfileEditSheet({
               type="button"
               onClick={() => {
                 haptic(5);
+                playTapSound();
                 setCustomReactions(saveCustomReactions(DEFAULT_CUSTOM_REACTIONS));
               }}
               className="chip !h-7 !min-h-0 !px-2.5 text-[11px]"
@@ -402,7 +471,7 @@ export default function ProfileEditSheet({
             </button>
           </div>
           <div className="mt-2.5 grid grid-cols-6 gap-1.5">
-            {EMOJI_LIBRARY.map((emoji) => {
+            {Array.from(new Set([...EMOJI_LIBRARY, ...customReactions])).map((emoji) => {
               const active = customReactions.includes(emoji);
               return (
                 <button
@@ -411,6 +480,7 @@ export default function ProfileEditSheet({
                   onClick={() => {
                     haptic(5);
                     if (active && customReactions.length <= 1) return;
+                    playTapSound();
                     const next = active
                       ? customReactions.filter((r) => r !== emoji)
                       : [...customReactions, emoji];
@@ -432,6 +502,49 @@ export default function ProfileEditSheet({
                 </button>
               );
             })}
+          </div>
+
+          <div className="mt-3">
+            <label htmlFor="profile-custom-emoji" className="label text-[11px]">
+              Add from your keyboard
+            </label>
+            <div className="mt-1.5 flex gap-1.5">
+              <input
+                id="profile-custom-emoji"
+                type="text"
+                value={customEmojiInput}
+                onChange={(e) => setCustomEmojiInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const graphemes = extractEmojiGraphemes(customEmojiInput);
+                    if (graphemes.length === 0) return;
+                    haptic(6);
+                    playTapSound();
+                    setCustomReactions(saveCustomReactions([...customReactions, ...graphemes]));
+                    setCustomEmojiInput('');
+                  }
+                }}
+                placeholder="Tap here & pick any emoji from keyboard"
+                maxLength={24}
+                className="field !min-h-[38px] flex-1 !rounded-xl px-3 text-xs"
+              />
+              <button
+                type="button"
+                disabled={extractEmojiGraphemes(customEmojiInput).length === 0}
+                onClick={() => {
+                  const graphemes = extractEmojiGraphemes(customEmojiInput);
+                  if (graphemes.length === 0) return;
+                  haptic(6);
+                  playTapSound();
+                  setCustomReactions(saveCustomReactions([...customReactions, ...graphemes]));
+                  setCustomEmojiInput('');
+                }}
+                className="btn-secondary !min-h-[38px] shrink-0 !rounded-xl !px-3 text-xs"
+              >
+                <Plus size={14} /> Add
+              </button>
+            </div>
           </div>
         </div>
 

@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { AVATAR_OPTIONS, type PublicDirectoryUser, type UseRoomReturn } from '@/types/exam';
+import { playTapSound } from '@/lib/sound-fx';
 import { Avatar, copyText, haptic } from './ui';
 import RoomLobby from './RoomLobby';
 import { InstallAppButton } from './InstallAppSheet';
@@ -324,6 +325,7 @@ function JoinScreen({
                 type="button"
                 onClick={() => {
                   haptic(5);
+                  playTapSound();
                   setTab(t);
                   if (t === 'join') setTimeout(() => codeRef.current?.focus(), 200);
                 }}

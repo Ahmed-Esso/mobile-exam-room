@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { AlertCircle, ArrowRight, X } from 'lucide-react';
 import { useRoom } from '@/hooks/useRoom';
 import LobbyView from '@/components/LobbyView';
 import EmojiReactionOverlay from '@/components/EmojiReactionOverlay';
 import PullToRefresh from '@/components/PullToRefresh';
+import { playNotificationSound } from '@/lib/sound-fx';
 
 const ExamArenaView = dynamic(() => import('@/components/ExamArenaView'), { ssr: false });
 const ResultsView = dynamic(() => import('@/components/ResultsView'), { ssr: false });
@@ -65,6 +66,15 @@ export default function HomePage() {
     (inv) => inv.roomCode !== room?.code
   );
   const latestInvite = activeInvites[0] ?? null;
+  const seenInviteBannerRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!latestInvite?.id) return;
+    if (!seenInviteBannerRef.current.has(latestInvite.id)) {
+      seenInviteBannerRef.current.add(latestInvite.id);
+      playNotificationSound();
+    }
+  }, [latestInvite?.id]);
 
   const acceptInvite = async (inv: RoomInvite) => {
     haptic([10, 30, 10]);

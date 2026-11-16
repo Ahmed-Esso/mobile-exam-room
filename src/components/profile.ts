@@ -147,6 +147,30 @@ export const DEFAULT_CUSTOM_REACTIONS: string[] = [
   '🫡',
 ];
 
+export function extractEmojiGraphemes(input: string): string[] {
+  const trimmed = (input || '').trim();
+  if (!trimmed) return [];
+  try {
+    const SegmenterCtor = (
+      Intl as unknown as {
+        Segmenter?: new (
+          locale?: string,
+          opts?: { granularity: 'grapheme' }
+        ) => { segment: (s: string) => Iterable<{ segment: string }> };
+      }
+    ).Segmenter;
+    if (SegmenterCtor) {
+      const seg = new SegmenterCtor(undefined, { granularity: 'grapheme' });
+      return Array.from(seg.segment(trimmed))
+        .map((part) => part.segment.trim())
+        .filter((g) => g.length > 0 && g.length <= 16);
+    }
+  } catch {
+    /* fallback below */
+  }
+  return Array.from(trimmed).filter((g) => g.trim().length > 0);
+}
+
 export function readCustomReactions(): string[] {
   try {
     const raw = window.localStorage.getItem(CUSTOM_REACTIONS_KEY);
@@ -155,8 +179,8 @@ export function readCustomReactions(): string[] {
     if (!Array.isArray(parsed)) return DEFAULT_CUSTOM_REACTIONS;
     const cleaned = parsed
       .map((item) => (typeof item === 'string' ? item.trim() : ''))
-      .filter((item) => item.length > 0 && item.length <= 12);
-    return cleaned.length > 0 ? cleaned.slice(0, 14) : DEFAULT_CUSTOM_REACTIONS;
+      .filter((item) => item.length > 0 && item.length <= 16);
+    return cleaned.length > 0 ? cleaned.slice(0, 24) : DEFAULT_CUSTOM_REACTIONS;
   } catch {
     return DEFAULT_CUSTOM_REACTIONS;
   }
@@ -164,8 +188,8 @@ export function readCustomReactions(): string[] {
 
 export function saveCustomReactions(emojis: string[]) {
   const cleaned = Array.from(
-    new Set(emojis.map((e) => e.trim()).filter((e) => e.length > 0 && e.length <= 12))
-  ).slice(0, 14);
+    new Set(emojis.map((e) => e.trim()).filter((e) => e.length > 0 && e.length <= 16))
+  ).slice(0, 24);
   const final = cleaned.length > 0 ? cleaned : DEFAULT_CUSTOM_REACTIONS;
   try {
     window.localStorage.setItem(CUSTOM_REACTIONS_KEY, JSON.stringify(final));

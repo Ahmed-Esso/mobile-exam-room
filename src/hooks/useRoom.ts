@@ -28,6 +28,11 @@ import {
   computeQuestionsDigest,
   mergeRoomStates,
 } from '@/lib/room-store';
+import {
+  playNotificationSound,
+  playReactionSound,
+  unlockAudio,
+} from '@/lib/sound-fx';
 
 const STORAGE_MEMBER_ID_KEY = 'exam_room_member_id_v2';
 const STORAGE_ACTIVE_ROOM_KEY = 'exam_room_active_code_v2';
@@ -183,8 +188,12 @@ export function useRoom(): UseRoomReturn {
   const flushingQueueRef = useRef<boolean>(false);
   const syncStartedAtRef = useRef<number>(0);
   const lastLocalMutationAtRef = useRef<number>(0);
+  const mountedAtRef = useRef<number>(Date.now());
+  const seenReactionIdsRef = useRef<Set<string>>(new Set());
+  const seenInviteIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
+    unlockAudio();
     const id = getOrCreateLocalMemberId();
     setMemberId(id);
 
@@ -474,6 +483,24 @@ export function useRoom(): UseRoomReturn {
 
       roomRef.current = merged;
       if (hasRoomMeaningfullyChanged(prev, merged)) {
+        // Sound when a new peer reaction arrives after mount
+        const activeMemberId = memberId || getOrCreateLocalMemberId();
+        for (const rx of merged.reactions || []) {
+          if (!seenReactionIdsRef.current.has(rx.id)) {
+            seenReactionIdsRef.current.add(rx.id);
+            if (
+              rx.senderId !== activeMemberId &&
+              rx.createdAt > mountedAtRef.current
+            ) {
+              playReactionSound();
+            }
+          }
+        }
+        if (seenReactionIdsRef.current.size > 200) {
+          seenReactionIdsRef.current = new Set(
+            Array.from(seenReactionIdsRef.current).slice(-100)
+          );
+        }
         setRoom(merged);
       }
 
@@ -489,7 +516,7 @@ export function useRoom(): UseRoomReturn {
         publishMqttState(merged, options.includeQuestions);
       }
     },
-    [hydrateRoomQuestions, handlePossibleKick, publishMqttState]
+    [memberId, hydrateRoomQuestions, handlePossibleKick, publishMqttState]
   );
 
   const applyDeltaToRoom = useCallback(
@@ -988,7 +1015,9 @@ export function useRoom(): UseRoomReturn {
           }
           map.set(inc.id, inc);
         }
-        if (addedNew) {
+        if (addedNew && !seenInviteIdsRef.current.has(addedNew.id)) {
+          seenInviteIdsRef.current.add(addedNew.id);
+          playNotificationSound();
           void triggerInviteNotification(addedNew);
         }
         const mergedInvites = Array.from(map.values()).sort(
@@ -1054,7 +1083,24 @@ export function useRoom(): UseRoomReturn {
         if (!res.ok) return;
         const data = await res.json();
         if (!cancelled && data?.account) {
-          setAccount(data.account);
+          const nextAcc = data.account as UserAccount;
+          const prevIds = new Set(
+            (accountRef.current?.invites || []).map((i) => i.id)
+          );
+          const freshInvites = (nextAcc.invites || []).filter(
+            (inv) =>
+              !prevIds.has(inv.id) &&
+              !seenInviteIdsRef.current.has(inv.id) &&
+              inv.createdAt > mountedAtRef.current - 60000
+          );
+          if (freshInvites.length > 0) {
+            for (const inv of freshInvites) {
+              seenInviteIdsRef.current.add(inv.id);
+            }
+            playNotificationSound();
+            void triggerInviteNotification(freshInvites[0]);
+          }
+          setAccount(nextAcc);
         }
       } catch {
         // Ignore

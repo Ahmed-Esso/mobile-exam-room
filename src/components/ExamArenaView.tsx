@@ -18,6 +18,14 @@ import {
   Zap,
 } from 'lucide-react';
 import type { ConnectionStatus, UseRoomReturn } from '@/types/exam';
+import {
+  playCorrectSound,
+  playExamStartSound,
+  playLockSound,
+  playNextQuestionSound,
+  playTapSound,
+  playWrongSound,
+} from '@/lib/sound-fx';
 import { Avatar, LETTERS, Markdown, MemberTag, Sheet, formatSeconds, haptic } from './ui';
 import MemberStrip from './MemberStrip';
 import ContextualReactStrip from './ContextualReactStrip';
@@ -49,6 +57,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
   const [playersOpen, setPlayersOpen] = useState(false);
   const [expandedExpl, setExpandedExpl] = useState<Record<number, boolean>>({});
   const prevRevealedRef = useRef<boolean>(false);
+  const prevQIdxRef = useRef<number>(-1);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const qIdx = room?.currentQuestionIndex ?? 0;
@@ -56,8 +65,15 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
   const timeLimit = currentQuestion?.timeLimitSeconds || room?.timePerQuestion || 0;
   const timerOn = timeLimit > 0;
 
-  // Reset per-question UI state when the question changes
+  // Reset per-question UI state when the question changes + play start/next chime
   useEffect(() => {
+    const prev = prevQIdxRef.current;
+    prevQIdxRef.current = qIdx;
+    if (prev === -1 && qIdx === 0) {
+      playExamStartSound();
+    } else if (prev >= 0 && qIdx > prev) {
+      playNextQuestionSound();
+    }
     setOptimisticOption(null);
     setJustBurst(false);
     setPressedNext(false);
@@ -66,13 +82,18 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
     scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   }, [qIdx]);
 
-  // Reveal moment: burst the member tags in + haptic
+  // Reveal moment: burst the member tags in + haptic + correct/wrong chime
   useEffect(() => {
     if (isAnswerRevealedToMe && !prevRevealedRef.current) {
       prevRevealedRef.current = true;
       setJustBurst(true);
-      if (myCurrentAnswer?.isCorrect) haptic([10, 40, 18]);
-      else if (myCurrentAnswer) haptic([30, 50, 30]);
+      if (myCurrentAnswer?.isCorrect) {
+        haptic([10, 40, 18]);
+        playCorrectSound();
+      } else if (myCurrentAnswer) {
+        haptic([30, 50, 30]);
+        playWrongSound();
+      }
       const t = window.setTimeout(() => setJustBurst(false), 900);
       return () => window.clearTimeout(t);
     }
@@ -107,12 +128,14 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
     if (hasLockedIn || isAnswerRevealedToMe) return;
     setOptimisticOption(idx);
     haptic(12);
+    playLockSound();
     await api.submitAnswer(idx);
   };
 
   const pressNext = () => {
     if (readyForNext) return;
     haptic([10, 30, 10]);
+    playTapSound();
     setPressedNext(true);
     void api.nextQuestion();
   };

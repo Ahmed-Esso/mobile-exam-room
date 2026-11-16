@@ -191,36 +191,70 @@ const PORTRAITS: Record<string, PortraitConfig> = {
 
   /* 🦉 Owl — البومة */
   '🦉': {
-    bgTop: '#f7ecdc',
-    bgBottom: '#e9d4b6',
+    bgTop: '#f7eee0',
+    bgBottom: '#ebd4b4',
     label: 'Owl',
     renderDefs: (uid) => (
-      <radialGradient id={`${uid}-owl`} cx="45%" cy="35%" r="68%">
-        <stop offset="0%" stopColor="#a4734d" />
-        <stop offset="70%" stopColor="#855836" />
-        <stop offset="100%" stopColor="#664024" />
-      </radialGradient>
+      <>
+        <radialGradient id={`${uid}-owl-body`} cx="46%" cy="32%" r="68%">
+          <stop offset="0%" stopColor="#bd8556" />
+          <stop offset="68%" stopColor="#94603a" />
+          <stop offset="100%" stopColor="#724627" />
+        </radialGradient>
+        <linearGradient id={`${uid}-owl-beak`} x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#ffbe4d" />
+          <stop offset="100%" stopColor="#f08c18" />
+        </linearGradient>
+      </>
     ),
     renderArt: (uid) => (
       <g>
-        <path d="M24 38 L 21 17 L 38 30 Z" fill="#72492d" />
-        <path d="M76 38 L 79 17 L 62 30 Z" fill="#72492d" />
-        <ellipse cx="50" cy="58" rx="31" ry="31" fill={`url(#${uid}-owl)`} />
-        <ellipse cx="50" cy="75" rx="17" ry="12" fill="#f2dcb9" />
+        {/* Soft rounded ear-feather tufts */}
         <path
-          d="M43 72 l 3 3 l 3 -3 M51 72 l 3 3 l 3 -3 M47 78 l 3 3 l 3 -3"
+          d="M27 42 C 22 30, 26 20, 35 23 C 40 25, 42 30, 42 35 Z"
+          fill="#855331"
+        />
+        <path
+          d="M73 42 C 78 30, 74 20, 65 23 C 60 25, 58 30, 58 35 Z"
+          fill="#855331"
+        />
+        <path d="M29 36 C 27 29, 30 24, 35 26" fill="none" stroke="#e8c89c" strokeWidth={2.2} strokeLinecap="round" opacity={0.75} />
+        <path d="M71 36 C 73 29, 70 24, 65 26" fill="none" stroke="#e8c89c" strokeWidth={2.2} strokeLinecap="round" opacity={0.75} />
+        {/* Cute tucked side wings */}
+        <ellipse cx="22" cy="66" rx="9" ry="16" fill="#77492a" transform="rotate(14 22 66)" />
+        <ellipse cx="78" cy="66" rx="9" ry="16" fill="#77492a" transform="rotate(-14 78 66)" />
+        {/* Plump pear-shaped baby owl body */}
+        <path
+          d="M50 26 C 69 26, 78 40, 79 59 C 80 79, 67 89, 50 89 C 33 89, 20 79, 21 59 C 22 40, 31 26, 50 26 Z"
+          fill={`url(#${uid}-owl-body)`}
+        />
+        {/* Soft scalloped cream tummy + curved breast feathers */}
+        <ellipse cx="50" cy="76" rx="18" ry="12" fill="#f7e8ce" />
+        <path
+          d="M41 72 Q 44 76 47 72 M47 72 Q 50 76 53 72 M53 72 Q 56 76 59 72 M44 78 Q 47 81.5 50 78 M50 78 Q 53 81.5 56 78"
           fill="none"
-          stroke="#b98c5e"
-          strokeWidth={1.4}
+          stroke="#c89d6c"
+          strokeWidth={1.5}
           strokeLinecap="round"
         />
-        {/* Feathered facial discs */}
-        <circle cx="38" cy="52" r="13.5" fill="#faebd2" />
-        <circle cx="62" cy="52" r="13.5" fill="#faebd2" />
-        <Eye cx={38} cy={52} r={6.3} sparkle />
-        <Eye cx={62} cy={52} r={6.3} sparkle />
-        <path d="M46 59 L 54 59 L 50 66.5 Z" fill="#ff9f1c" />
-        <Cheeks y={64} dx={19} />
+        {/* Warm heart-shaped cream spectacle facial mask */}
+        <path
+          d="M50 38 C 44 31, 27 32, 26 48 C 25 60, 38 66, 50 64 C 62 66, 75 60, 74 48 C 73 32, 56 31, 50 38 Z"
+          fill="#fbf1de"
+        />
+        {/* Soft golden eye rims */}
+        <circle cx="38.5" cy="49" r="10.2" fill="none" stroke="#e9c792" strokeWidth={1.8} />
+        <circle cx="61.5" cy="49" r="10.2" fill="none" stroke="#e9c792" strokeWidth={1.8} />
+        {/* Large expressive kawaii eyes */}
+        <Eye cx={38.5} cy={49} r={5.7} sparkle />
+        <Eye cx={61.5} cy={49} r={5.7} sparkle />
+        {/* Rosy cheeks gently below eyes */}
+        <Cheeks y={58} dx={16.5} />
+        {/* Tiny cute rounded golden-amber beak */}
+        <path
+          d="M46 54.5 Q 50 51.5 54 54.5 Q 53 59.5 50 60.5 Q 47 59.5 46 54.5 Z"
+          fill={`url(#${uid}-owl-beak)`}
+        />
       </g>
     ),
   },

@@ -20,6 +20,7 @@ import {
   X,
 } from 'lucide-react';
 import type { Member, MemberAnswerTag, UseRoomReturn } from '@/types/exam';
+import { playPodiumSound } from '@/lib/sound-fx';
 import { Avatar, LETTERS, Markdown, MemberTag, copyText, formatSeconds, haptic } from './ui';
 import ReactionDock from './ReactionDock';
 
@@ -31,9 +32,10 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
   const [exportingMode, setExportingMode] = useState<'missed' | 'all' | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
 
-  // Fire celebration confetti when podium mounts
+  // Fire celebration confetti + podium fanfare when podium mounts
   useEffect(() => {
     haptic([15, 50, 20, 50, 30]);
+    playPodiumSound();
     try {
       void confetti({
         particleCount: 65,

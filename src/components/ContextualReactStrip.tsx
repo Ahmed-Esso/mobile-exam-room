@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { Member, ReactionKind, RoomState, UseRoomReturn } from '@/types/exam';
 import { emitLocalReaction } from './EmojiReactionOverlay';
 import AnimalAvatarArt from './AnimalAvatarArt';
+import { playReactionSound } from '@/lib/sound-fx';
 import { haptic } from './ui';
 
 type Relation = 'they-right-me-wrong' | 'both-right' | 'me-right-they-wrong';
@@ -94,6 +95,7 @@ export default function ContextualReactStrip({ api, room }: { api: UseRoomReturn
 
   const fire = (q: { emoji: string; label: string }) => {
     haptic([10, 40, 18]);
+    playReactionSound();
     setSent(`${active.member.id}:${q.emoji}`);
     window.setTimeout(() => setSent((s) => (s === `${active.member.id}:${q.emoji}` ? null : s)), 1600);
     const kind = KIND[active.relation];
