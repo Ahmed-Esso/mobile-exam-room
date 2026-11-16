@@ -170,6 +170,9 @@ export function useRoom(): UseRoomReturn {
   const [mqttConnected, setMqttConnected] = useState<boolean>(false);
   const [syncPendingCount, setSyncPendingCount] = useState<number>(0);
   const [wasKicked, setWasKicked] = useState<boolean>(false);
+  const [friendPresence, setFriendPresence] = useState<
+    Record<string, ConnectionStatus>
+  >({});
   const [notificationPermission, setNotificationPermission] = useState<
     NotificationPermission | 'unsupported'
   >('unsupported');
@@ -183,8 +186,13 @@ export function useRoom(): UseRoomReturn {
   const questionsCacheRef = useRef<Map<string, Question[]>>(new Map());
   const seenDeltaIdsRef = useRef<Set<string>>(new Set());
   const peerLastSeenRef = useRef<Record<string, number>>({});
+  const peerRemoteClockRef = useRef<Record<string, number>>({});
   const peerExplicitStatusRef = useRef<Record<string, ConnectionStatus>>({});
   const actionQueueRef = useRef<QueuedRoomAction[]>([]);
+  const pendingOutboundInvitesRef = useRef<
+    Array<{ toUsername: string; invite: RoomInvite }>
+  >([]);
+  const sentInboxCacheRef = useRef<Record<string, RoomInvite[]>>({});
   const flushingQueueRef = useRef<boolean>(false);
   const syncStartedAtRef = useRef<number>(0);
   const lastLocalMutationAtRef = useRef<number>(0);
@@ -482,6 +490,24 @@ export function useRoom(): UseRoomReturn {
       }
 
       roomRef.current = merged;
+
+      // Record local receive timestamp whenever a member is first seen or their remote clock advances
+      const localNow = Date.now();
+      for (const m of merged.members || []) {
+        if (!peerLastSeenRef.current[m.id]) {
+          peerLastSeenRef.current[m.id] = localNow;
+          peerRemoteClockRef.current[m.id] = m.lastSeenAt || 0;
+          peerExplicitStatusRef.current[m.id] = 'online';
+        } else if (
+          m.lastSeenAt &&
+          m.lastSeenAt > (peerRemoteClockRef.current[m.id] || 0)
+        ) {
+          peerRemoteClockRef.current[m.id] = m.lastSeenAt;
+          peerLastSeenRef.current[m.id] = localNow;
+          peerExplicitStatusRef.current[m.id] = 'online';
+        }
+      }
+
       if (hasRoomMeaningfullyChanged(prev, merged)) {
         // Sound when a new peer reaction arrives after mount
         const activeMemberId = memberId || getOrCreateLocalMemberId();
@@ -536,17 +562,14 @@ export function useRoom(): UseRoomReturn {
       let updated: RoomState | null = null;
 
       if (delta.t === 'hb') {
-        peerLastSeenRef.current[delta.m] = delta.ts || now;
+        peerLastSeenRef.current[delta.m] = now;
         peerExplicitStatusRef.current[delta.m] = delta.status;
         setPresenceTick(now);
         return;
       }
 
       if ('m' in delta && delta.m) {
-        peerLastSeenRef.current[delta.m] = Math.max(
-          peerLastSeenRef.current[delta.m] || 0,
-          delta.ts || now
-        );
+        peerLastSeenRef.current[delta.m] = now;
         peerExplicitStatusRef.current[delta.m] = 'online';
       }
 
@@ -911,10 +934,17 @@ export function useRoom(): UseRoomReturn {
       }
 
       const title = `${invite.fromAvatar} ${invite.fromName} invited you!`;
-      const options: NotificationOptions = {
+      const targetUrl = `/?room=${encodeURIComponent(invite.roomCode)}`;
+      const options: NotificationOptions & { requireInteraction?: boolean } = {
         body: `Join "${invite.roomTitle}" (Room ${invite.roomCode})`,
         icon: '/api/pwa-icon?size=192',
         tag: `invite-${invite.roomCode}`,
+        data: {
+          url: targetUrl,
+          roomCode: invite.roomCode,
+          inviteId: invite.id,
+        },
+        requireInteraction: true,
       };
 
       try {
@@ -925,7 +955,20 @@ export function useRoom(): UseRoomReturn {
             return;
           }
         }
-        new Notification(title, options);
+        const notif = new Notification(title, options);
+        notif.onclick = () => {
+          try {
+            window.focus();
+            window.dispatchEvent(
+              new CustomEvent('exam:open-room-invite', {
+                detail: { roomCode: invite.roomCode, inviteId: invite.id },
+              })
+            );
+            notif.close();
+          } catch {
+            // Ignore
+          }
+        };
       } catch {
         // Ignore notification errors on unsupported webviews
       }
@@ -948,7 +991,71 @@ export function useRoom(): UseRoomReturn {
     }
   }, []);
 
-  // Global MQTT user directory + reliable retained inbox + live invites listener
+  const publishInviteOverMqtt = useCallback(
+    (
+      client: MqttClient | null,
+      toUsername: string,
+      invite: RoomInvite,
+      explicitInbox?: RoomInvite[]
+    ): boolean => {
+      if (!client || !client.connected) return false;
+      const cleanTo = toUsername.trim().replace(/^@+/, '').toLowerCase();
+      if (!cleanTo) return false;
+      try {
+        const inviteTopic = `examroom/v2/user/${encodeURIComponent(
+          cleanTo
+        )}/invites`;
+        client.publish(inviteTopic, JSON.stringify(invite), {
+          qos: 1,
+          retain: false,
+        });
+
+        const prevCached = sentInboxCacheRef.current[cleanTo] || [];
+        const baseList = explicitInbox
+          ? [...explicitInbox, ...prevCached]
+          : [invite, ...prevCached];
+        const deduped = new Map<string, RoomInvite>();
+        const now = Date.now();
+        for (const item of baseList) {
+          if (item?.id && now - item.createdAt <= INVITE_TTL_MS) {
+            deduped.set(item.id, item);
+          }
+        }
+        const mergedInbox = Array.from(deduped.values())
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, 20);
+        sentInboxCacheRef.current[cleanTo] = mergedInbox;
+
+        const inboxTopic = `examroom/v2/user/${encodeURIComponent(
+          cleanTo
+        )}/inbox`;
+        client.publish(inboxTopic, JSON.stringify(mergedInbox), {
+          qos: 1,
+          retain: true,
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    []
+  );
+
+  const flushPendingOutboundInvites = useCallback(
+    (client: MqttClient | null) => {
+      if (!client || !client.connected) return;
+      if (pendingOutboundInvitesRef.current.length === 0) return;
+      const remaining: Array<{ toUsername: string; invite: RoomInvite }> = [];
+      for (const item of pendingOutboundInvitesRef.current) {
+        const ok = publishInviteOverMqtt(client, item.toUsername, item.invite);
+        if (!ok) remaining.push(item);
+      }
+      pendingOutboundInvitesRef.current = remaining;
+    },
+    [publishInviteOverMqtt]
+  );
+
+  // Global MQTT user directory + reliable retained inbox + live invites + friend presence listener
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
@@ -960,19 +1067,54 @@ export function useRoom(): UseRoomReturn {
     const inboxTopic = username
       ? `examroom/v2/user/${encodeURIComponent(username)}/inbox`
       : null;
+    const myPresenceTopic = username
+      ? `examroom/v2/user/${encodeURIComponent(username)}/presence`
+      : null;
     const directoryWildcard = 'examroom/v2/directory/+';
+    const friendPresenceTopics = (account?.friends || [])
+      .map((f) => f.username?.toLowerCase())
+      .filter((u): u is string => Boolean(u))
+      .map((u) => `examroom/v2/user/${encodeURIComponent(u)}/presence`);
 
     const client = mqtt.connect(MQTT_BROKERS[0], {
       clientId: `usr-${Math.random().toString(36).slice(2, 10)}`,
       clean: true,
       connectTimeout: 5000,
-      reconnectPeriod: 3000,
+      reconnectPeriod: 2000,
+      keepalive: 15,
+      ...(myPresenceTopic && username
+        ? {
+            will: {
+              topic: myPresenceTopic,
+              payload: JSON.stringify({
+                u: username,
+                status: 'offline',
+                ts: Date.now(),
+              }),
+              qos: 1,
+              retain: true,
+            },
+          }
+        : {}),
     });
     userMqttClientRef.current = client;
 
+    const publishMyUserPresence = (status: ConnectionStatus) => {
+      if (!client.connected || !myPresenceTopic || !username) return;
+      try {
+        client.publish(
+          myPresenceTopic,
+          JSON.stringify({ u: username, status, ts: Date.now() }),
+          { qos: 1, retain: true }
+        );
+      } catch {
+        // Ignore
+      }
+    };
+
     client.on('connect', () => {
       if (cancelled) return;
-      const topics = [directoryWildcard];
+      const topics = [directoryWildcard, ...friendPresenceTopics];
       if (inviteTopic) topics.push(inviteTopic);
       if (inboxTopic) topics.push(inboxTopic);
       client.subscribe(topics, { qos: 1 });
@@ -991,6 +1133,13 @@ export function useRoom(): UseRoomReturn {
           retain: true,
         });
       }
+
+      publishMyUserPresence(
+        typeof navigator !== 'undefined' && !navigator.onLine
+          ? 'offline'
+          : 'online'
+      );
+      flushPendingOutboundInvites(client);
     });
 
     const mergeIncomingInvites = (incomingList: RoomInvite[]) => {
@@ -1044,6 +1193,22 @@ export function useRoom(): UseRoomReturn {
           const entry = JSON.parse(payload.toString()) as PublicDirectoryUser;
           if (entry?.username) {
             directoryMapRef.current.set(entry.username.toLowerCase(), entry);
+          }
+          return;
+        }
+
+        if (topic.startsWith('examroom/v2/user/') && topic.endsWith('/presence')) {
+          const pres = JSON.parse(payload.toString()) as {
+            u?: string;
+            status?: ConnectionStatus;
+          };
+          if (pres?.u && pres?.status) {
+            const key = pres.u.toLowerCase();
+            setFriendPresence((prev) =>
+              prev[key] === pres.status
+                ? prev
+                : { ...prev, [key]: pres.status! }
+            );
           }
           return;
         }
@@ -1110,22 +1275,42 @@ export function useRoom(): UseRoomReturn {
     if (account?.email) {
       syncAccount();
     }
-    const interval = setInterval(syncAccount, 5000);
+    const interval = setInterval(() => {
+      void syncAccount();
+      publishMyUserPresence(
+        typeof navigator !== 'undefined' && !navigator.onLine
+          ? 'offline'
+          : 'online'
+      );
+    }, 15000);
+
+    const accountSyncInterval = setInterval(syncAccount, 5000);
 
     const onWake = () => {
       if (!document.hidden && accountRef.current?.email) {
+        publishMyUserPresence('online');
+        void syncAccount();
+      }
+    };
+    const onOnline = () => {
+      if (accountRef.current?.email) {
+        publishMyUserPresence('online');
         void syncAccount();
       }
     };
     window.addEventListener('focus', onWake);
+    window.addEventListener('online', onOnline);
     document.addEventListener('visibilitychange', onWake);
 
     return () => {
       cancelled = true;
       clearInterval(interval);
+      clearInterval(accountSyncInterval);
       window.removeEventListener('focus', onWake);
+      window.removeEventListener('online', onOnline);
       document.removeEventListener('visibilitychange', onWake);
       try {
+        publishMyUserPresence('offline');
         client.end(true);
       } catch {
         // Ignore
@@ -1138,7 +1323,9 @@ export function useRoom(): UseRoomReturn {
     account?.name,
     account?.avatar,
     account?.pictureUrl,
+    account?.friends,
     triggerInviteNotification,
+    flushPendingOutboundInvites,
   ]);
 
   // Real-time MQTT over WebSockets for Room: delta + state + questions + presence + LWT
@@ -1215,6 +1402,7 @@ export function useRoom(): UseRoomReturn {
                 { qos: 0, retain: false }
               );
             }
+            flushPendingOutboundInvites(client);
             void flushActionQueue();
           }
         );
@@ -1238,7 +1426,8 @@ export function useRoom(): UseRoomReturn {
               ts: number;
             };
             if (p?.m) {
-              peerLastSeenRef.current[p.m] = p.ts || Date.now();
+              // Always record local receive time (never remote clock p.ts!) to avoid clock skew
+              peerLastSeenRef.current[p.m] = Date.now();
               peerExplicitStatusRef.current[p.m] = p.status || 'online';
               setPresenceTick(Date.now());
             }
@@ -1305,15 +1494,6 @@ export function useRoom(): UseRoomReturn {
             const incomingRaw = JSON.parse(payload.toString()) as RoomState;
             if (!incomingRaw || incomingRaw.code !== code) return;
 
-            for (const m of incomingRaw.members || []) {
-              if (m.lastSeenAt) {
-                peerLastSeenRef.current[m.id] = Math.max(
-                  peerLastSeenRef.current[m.id] || 0,
-                  m.lastSeenAt
-                );
-              }
-            }
-
             const prevCount = roomRef.current?.members.length || 0;
             commitRoomState(incomingRaw, { publishMqtt: false });
 
@@ -1373,9 +1553,37 @@ export function useRoom(): UseRoomReturn {
       }
     }, 4000);
 
+    const handleRoomOnlineWake = () => {
+      if (
+        mqttClientRef.current &&
+        mqttClientRef.current.connected &&
+        typeof document !== 'undefined' &&
+        !document.hidden
+      ) {
+        try {
+          mqttClientRef.current.publish(
+            presenceTopic,
+            JSON.stringify({
+              m: activeMemberId,
+              status: navigator.onLine ? 'online' : 'offline',
+              ts: Date.now(),
+            }),
+            { qos: 0, retain: false }
+          );
+        } catch {
+          // Ignore
+        }
+      }
+    };
+
+    window.addEventListener('online', handleRoomOnlineWake);
+    document.addEventListener('visibilitychange', handleRoomOnlineWake);
+
     return () => {
       isCancelled = true;
       clearInterval(hbInterval);
+      window.removeEventListener('online', handleRoomOnlineWake);
+      document.removeEventListener('visibilitychange', handleRoomOnlineWake);
       setMqttConnected(false);
       if (mqttClientRef.current) {
         try {
@@ -1393,6 +1601,7 @@ export function useRoom(): UseRoomReturn {
     applyDeltaToRoom,
     commitRoomState,
     flushActionQueue,
+    flushPendingOutboundInvites,
   ]);
 
   // Adaptive, visibility-aware HTTP sync (2.5s when MQTT connected, 1s when disconnected, paused when hidden)
@@ -1747,12 +1956,48 @@ export function useRoom(): UseRoomReturn {
         return false;
       }
       const cleanTo = friendUsername.trim().replace(/^@+/, '').toLowerCase();
-      try {
+      if (!cleanTo) return false;
+
+      const now = Date.now();
+      const inviteId = `inv-${now}-${Math.random().toString(36).slice(2, 7)}`;
+      const invite: RoomInvite = {
+        id: inviteId,
+        fromUsername: currentAcc.username,
+        fromEmail: currentAcc.email,
+        fromName: currentAcc.name,
+        fromAvatar: currentAcc.avatar,
+        roomCode: currentRoom.code,
+        roomTitle: currentRoom.title,
+        createdAt: now,
+      };
+
+      // 1. Publish over MQTT immediately (0ms) or queue if reconnecting
+      const client =
+        userMqttClientRef.current?.connected
+          ? userMqttClientRef.current
+          : mqttClientRef.current?.connected
+          ? mqttClientRef.current
+          : null;
+
+      let mqttSentOrQueued = false;
+      if (client && publishInviteOverMqtt(client, cleanTo, invite)) {
+        mqttSentOrQueued = true;
+      } else {
+        pendingOutboundInvitesRef.current.push({
+          toUsername: cleanTo,
+          invite,
+        });
+        mqttSentOrQueued = true;
+      }
+
+      // 2. Persist via /api/accounts in background with 1 retry so button never hangs
+      const sendHttp = async () => {
         const res = await fetch('/api/accounts', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'sendInvite',
+            inviteId,
             fromUsername: currentAcc.username,
             fromEmail: currentAcc.email,
             fromName: currentAcc.name,
@@ -1762,39 +2007,41 @@ export function useRoom(): UseRoomReturn {
             roomTitle: currentRoom.title,
           }),
         });
-        const data = await res.json();
-        if (!res.ok || !data?.invite) {
-          throw new Error(data?.error || 'Could not send invite.');
-        }
+        if (!res.ok) return null;
+        return res.json();
+      };
 
-        const client = userMqttClientRef.current || mqttClientRef.current;
-        if (client && client.connected) {
-          const inviteTopic = `examroom/v2/user/${encodeURIComponent(
-            cleanTo
-          )}/invites`;
-          client.publish(inviteTopic, JSON.stringify(data.invite), {
-            qos: 1,
-            retain: false,
-          });
-
-          const inboxTopic = `examroom/v2/user/${encodeURIComponent(
-            cleanTo
-          )}/inbox`;
-          const inboxPayload = Array.isArray(data.inboxInvites)
-            ? data.inboxInvites
-            : [data.invite];
-          client.publish(inboxTopic, JSON.stringify(inboxPayload), {
-            qos: 1,
-            retain: true,
-          });
+      void (async () => {
+        try {
+          let data = await sendHttp();
+          if (!data) {
+            await new Promise((r) => setTimeout(r, 700));
+            data = await sendHttp();
+          }
+          if (data?.inboxInvites) {
+            const activeClient =
+              userMqttClientRef.current?.connected
+                ? userMqttClientRef.current
+                : mqttClientRef.current?.connected
+                ? mqttClientRef.current
+                : null;
+            if (activeClient) {
+              publishInviteOverMqtt(
+                activeClient,
+                cleanTo,
+                invite,
+                data.inboxInvites as RoomInvite[]
+              );
+            }
+          }
+        } catch {
+          // MQTT delivery already succeeded or queued
         }
-        return true;
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to send invite');
-        return false;
-      }
+      })();
+
+      return mqttSentOrQueued;
     },
-    []
+    [publishInviteOverMqtt]
   );
 
   const dismissRoomInvite = useCallback(async (inviteId: string) => {
@@ -2597,12 +2844,13 @@ export function useRoom(): UseRoomReturn {
         continue;
       }
       const explicit = peerExplicitStatusRef.current[m.id];
-      const lastSeen = Math.max(
-        peerLastSeenRef.current[m.id] || 0,
-        m.lastSeenAt || 0
-      );
+      const lastSeen = peerLastSeenRef.current[m.id];
+      if (!lastSeen) {
+        map[m.id] = 'online';
+        continue;
+      }
       const age = now - lastSeen;
-      if (explicit === 'offline' && lastSeen <= (peerLastSeenRef.current[m.id] || 0)) {
+      if (explicit === 'offline') {
         map[m.id] = 'offline';
       } else if (age > 25000) {
         map[m.id] = 'offline';
@@ -2777,6 +3025,7 @@ export function useRoom(): UseRoomReturn {
     wasKicked,
     clearKickedNotice,
     memberConnectionStatus,
+    friendPresence,
     notificationPermission,
     requestNotificationPermission,
     allMembersReady,

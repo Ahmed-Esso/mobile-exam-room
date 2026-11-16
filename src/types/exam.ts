@@ -243,6 +243,7 @@ export interface UseRoomReturn {
   wasKicked: boolean;
   clearKickedNotice: () => void;
   memberConnectionStatus: Record<string, ConnectionStatus>;
+  friendPresence: Record<string, ConnectionStatus>;
   notificationPermission: NotificationPermission | 'unsupported';
   requestNotificationPermission: () => Promise<NotificationPermission | 'unsupported'>;
 

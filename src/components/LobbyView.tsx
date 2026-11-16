@@ -546,26 +546,43 @@ function JoinScreen({
 
               {account.friends.length > 0 ? (
                 <div className="no-scrollbar -mx-3.5 mt-2.5 flex gap-2 overflow-x-auto px-3.5 pb-0.5">
-                  {account.friends.map((f) => (
-                    <span
-                      key={f.username}
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[var(--ink-2)] py-1 pl-1.5 pr-2.5 text-xs shadow-[0_0_0_1px_var(--line)]"
-                    >
-                      <Avatar emoji={f.avatar || '🐥'} size={24} />
-                      <span className="font-semibold text-[var(--paper)]">@{f.username}</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          haptic(5);
-                          void api.removeFriendByUsername(f.username);
-                        }}
-                        className="press rounded-full p-0.5 text-[var(--muted)] hover:text-[var(--coral)]"
-                        aria-label={`Remove @${f.username}`}
+                  {account.friends.map((f) => {
+                    const status = api.friendPresence?.[f.username.toLowerCase()];
+                    const dotColor =
+                      status === 'online'
+                        ? 'var(--lime)'
+                        : status === 'weak'
+                        ? 'var(--amber)'
+                        : 'var(--faint)';
+                    return (
+                      <span
+                        key={f.username}
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[var(--ink-2)] py-1 pl-1.5 pr-2.5 text-xs shadow-[0_0_0_1px_var(--line)]"
+                        title={`@${f.username} (${status ?? 'offline'})`}
                       >
-                        <X size={12} />
-                      </button>
-                    </span>
-                  ))}
+                        <span className="relative inline-flex shrink-0">
+                          <Avatar emoji={f.avatar || '🐥'} size={24} />
+                          <span
+                            className="absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-[var(--ink-2)]"
+                            style={{ background: dotColor }}
+                            aria-label={status ?? 'offline'}
+                          />
+                        </span>
+                        <span className="font-semibold text-[var(--paper)]">@{f.username}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            haptic(5);
+                            void api.removeFriendByUsername(f.username);
+                          }}
+                          className="press rounded-full p-0.5 text-[var(--muted)] hover:text-[var(--coral)]"
+                          aria-label={`Remove @${f.username}`}
+                        >
+                          <X size={12} />
+                        </button>
+                      </span>
+                    );
+                  })}
                 </div>
               ) : !addFriendOpen ? (
                 <p className="mt-2 text-xs text-[var(--muted)]">

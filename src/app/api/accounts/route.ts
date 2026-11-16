@@ -14,11 +14,13 @@ const INVITE_TTL_MS = 1000 * 60 * 15; // 15 minutes
 interface DiskAccountPayload {
   accounts: Record<string, UserAccount>;
   googleClientId?: string;
+  pendingInvitesByUsername?: Record<string, RoomInvite[]>;
 }
 
 interface GlobalAccountStore {
   accounts: Map<string, UserAccount>;
   googleClientId: string;
+  pendingInvitesByUsername: Record<string, RoomInvite[]>;
 }
 
 const globalForAccounts = globalThis as unknown as {
@@ -40,6 +42,11 @@ function loadDiskData(): DiskAccountPayload {
             typeof parsed.googleClientId === 'string'
               ? parsed.googleClientId
               : '',
+          pendingInvitesByUsername:
+            parsed.pendingInvitesByUsername &&
+            typeof parsed.pendingInvitesByUsername === 'object'
+              ? (parsed.pendingInvitesByUsername as Record<string, RoomInvite[]>)
+              : {},
         };
       }
     }
@@ -61,6 +68,7 @@ function saveDiskData(store: GlobalAccountStore) {
     const payload: DiskAccountPayload = {
       accounts: obj,
       googleClientId: store.googleClientId,
+      pendingInvitesByUsername: store.pendingInvitesByUsername,
     };
     fs.writeFileSync(TMP_ACCOUNTS_PATH, JSON.stringify(payload), 'utf8');
   } catch {
@@ -150,11 +158,27 @@ function getAccountStore(): GlobalAccountStore {
     globalForAccounts.__examAccountStoreV3 = {
       accounts,
       googleClientId: disk.googleClientId || '',
+      pendingInvitesByUsername: disk.pendingInvitesByUsername || {},
     };
   } else {
     const disk = loadDiskData();
     if (disk.googleClientId && !globalForAccounts.__examAccountStoreV3.googleClientId) {
       globalForAccounts.__examAccountStoreV3.googleClientId = disk.googleClientId;
+    }
+    if (disk.pendingInvitesByUsername) {
+      for (const [uname, list] of Object.entries(disk.pendingInvitesByUsername)) {
+        const cur =
+          globalForAccounts.__examAccountStoreV3.pendingInvitesByUsername[uname] ||
+          [];
+        const map = new Map<string, RoomInvite>();
+        for (const inv of [...cur, ...(list || [])]) {
+          if (inv?.id && Date.now() - inv.createdAt <= INVITE_TTL_MS) {
+            map.set(inv.id, inv);
+          }
+        }
+        globalForAccounts.__examAccountStoreV3.pendingInvitesByUsername[uname] =
+          Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt);
+      }
     }
     for (const [email, diskAcc] of Object.entries(disk.accounts)) {
       const key = email.toLowerCase();
@@ -166,6 +190,29 @@ function getAccountStore(): GlobalAccountStore {
     }
   }
   return globalForAccounts.__examAccountStoreV3;
+}
+
+function mergePendingInvites(
+  store: GlobalAccountStore,
+  acc: UserAccount
+): UserAccount {
+  const uname = acc.username?.toLowerCase();
+  if (!uname) return pruneInvites(acc);
+  const pending = (store.pendingInvitesByUsername[uname] || []).filter(
+    (i) => Date.now() - i.createdAt <= INVITE_TTL_MS
+  );
+  if (pending.length === 0) return pruneInvites(acc);
+
+  const map = new Map<string, RoomInvite>();
+  for (const inv of [...(acc.invites || []), ...pending]) {
+    if (inv?.id && Date.now() - inv.createdAt <= INVITE_TTL_MS) {
+      map.set(inv.id, inv);
+    }
+  }
+  return {
+    ...acc,
+    invites: Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt),
+  };
 }
 
 function findAccountByUsername(
@@ -402,9 +449,10 @@ export async function POST(req: NextRequest) {
             updatedAt: now,
           };
 
-      store.accounts.set(email, updated);
+      const mergedWithPending = mergePendingInvites(store, updated);
+      store.accounts.set(email, mergedWithPending);
       saveDiskData(store);
-      return NextResponse.json({ account: updated });
+      return NextResponse.json({ account: mergedWithPending });
     }
 
     if (action === 'updateUsername') {
@@ -559,9 +607,10 @@ export async function POST(req: NextRequest) {
       if (!merged) {
         return NextResponse.json({ error: 'Account not found' }, { status: 404 });
       }
-      store.accounts.set(email, merged);
+      const withPending = mergePendingInvites(store, merged);
+      store.accounts.set(email, withPending);
       saveDiskData(store);
-      return NextResponse.json({ account: merged });
+      return NextResponse.json({ account: withPending });
     }
 
     if (action === 'addFriend') {
@@ -675,9 +724,10 @@ export async function POST(req: NextRequest) {
         friends: myAccount.friends.filter((f) => f.username !== cleanFriendUsername),
         updatedAt: now,
       };
-      store.accounts.set(email, updated);
+      const mergedWithPending = mergePendingInvites(store, updated);
+      store.accounts.set(email, mergedWithPending);
       saveDiskData(store);
-      return NextResponse.json({ account: updated });
+      return NextResponse.json({ account: mergedWithPending });
     }
 
     if (action === 'sendInvite') {
@@ -694,8 +744,13 @@ export async function POST(req: NextRequest) {
         );
       }
 
+      const inviteId =
+        typeof body.inviteId === 'string' && body.inviteId.trim()
+          ? body.inviteId.trim()
+          : `inv-${now}-${Math.random().toString(36).slice(2, 7)}`;
+
       const invite: RoomInvite = {
-        id: `inv-${now}-${Math.random().toString(36).slice(2, 7)}`,
+        id: inviteId,
         fromUsername: fromUsername || fromEmail.split('@')[0] || 'friend',
         fromEmail,
         fromName: String(body.fromName || fromUsername || 'Friend'),
@@ -705,8 +760,16 @@ export async function POST(req: NextRequest) {
         createdAt: now,
       };
 
+      const existingPending = (
+        store.pendingInvitesByUsername[toUsername] || []
+      ).filter(
+        (i) => i.roomCode !== roomCode && now - i.createdAt <= INVITE_TTL_MS
+      );
+      const nextPending = [invite, ...existingPending].slice(0, 20);
+      store.pendingInvitesByUsername[toUsername] = nextPending;
+
       const recipient = findAccountByUsername(store, toUsername);
-      let inboxInvites: RoomInvite[] = [invite];
+      let inboxInvites: RoomInvite[] = nextPending;
       if (recipient) {
         const updatedRecipient = pruneInvites({
           ...recipient,
@@ -718,8 +781,8 @@ export async function POST(req: NextRequest) {
         });
         inboxInvites = updatedRecipient.invites;
         store.accounts.set(recipient.email, updatedRecipient);
-        saveDiskData(store);
       }
+      saveDiskData(store);
 
       return NextResponse.json({ invite, inboxInvites, sent: true });
     }
@@ -731,14 +794,22 @@ export async function POST(req: NextRequest) {
       if (!acc) {
         return NextResponse.json({ error: 'Account not found' }, { status: 404 });
       }
+      const uname = acc.username?.toLowerCase();
+      if (uname && store.pendingInvitesByUsername[uname]) {
+        store.pendingInvitesByUsername[uname] =
+          store.pendingInvitesByUsername[uname].filter(
+            (i) => i.id !== inviteId
+          );
+      }
       const updated: UserAccount = {
         ...acc,
         invites: acc.invites.filter((i) => i.id !== inviteId),
         updatedAt: now,
       };
-      store.accounts.set(email, updated);
+      const mergedWithPending = mergePendingInvites(store, updated);
+      store.accounts.set(email, mergedWithPending);
       saveDiskData(store);
-      return NextResponse.json({ account: updated });
+      return NextResponse.json({ account: mergedWithPending });
     }
 
     return NextResponse.json({ error: 'Unknown action' }, { status: 400 });

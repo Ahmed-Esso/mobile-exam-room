@@ -52,3 +52,34 @@ self.addEventListener('fetch', (event) => {
       })
   );
 });
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const roomCode = event.notification?.data?.roomCode || '';
+  const targetUrl =
+    event.notification?.data?.url ||
+    (roomCode ? `/?room=${encodeURIComponent(roomCode)}` : '/');
+
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: 'window', includeUncontrolled: true })
+      .then(async (clientList) => {
+        for (const client of clientList) {
+          if ('focus' in client) {
+            try {
+              await client.focus();
+            } catch {
+              /* ignore */
+            }
+            if (roomCode && 'postMessage' in client) {
+              client.postMessage({ type: 'OPEN_ROOM_INVITE', roomCode });
+            }
+            return;
+          }
+        }
+        if (self.clients.openWindow) {
+          return self.clients.openWindow(targetUrl);
+        }
+      })
+  );
+});

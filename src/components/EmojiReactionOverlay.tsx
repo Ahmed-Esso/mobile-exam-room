@@ -16,6 +16,7 @@ export interface LocalReactionDetail {
   kind: ReactionKind;
   targetName?: string;
   targetAvatar?: string;
+  targetMemberId?: string;
 }
 
 const LOCAL_EVENT = 'exam:local-reaction';
@@ -93,7 +94,15 @@ export default function EmojiReactionOverlay({
   const [particles, setParticles] = useState<Particle[]>([]);
   const seen = useRef<Set<string>>(new Set());
   const primed = useRef(false);
-  const pending = useRef<{ emoji: string; kind: ReactionKind; at: number }[]>([]);
+  const pending = useRef<
+    {
+      emoji: string;
+      kind: ReactionKind;
+      targetName?: string;
+      targetMemberId?: string;
+      at: number;
+    }[]
+  >([]);
   const timers = useRef<number[]>([]);
 
   const later = useCallback((fn: () => void, ms: number) => {
@@ -171,7 +180,6 @@ export default function EmojiReactionOverlay({
     (s: Spawnable) => {
       if (s.kind.startsWith('contextual')) {
         spawnBanner(s, !!meId && s.targetMemberId === meId);
-        spawnBubble(s);
       } else {
         spawnBubble(s);
       }
@@ -183,7 +191,13 @@ export default function EmojiReactionOverlay({
   useEffect(() => {
     const onLocal = (e: Event) => {
       const d = (e as CustomEvent<LocalReactionDetail>).detail;
-      pending.current.push({ emoji: d.emoji, kind: d.kind, at: Date.now() });
+      pending.current.push({
+        emoji: d.emoji,
+        kind: d.kind,
+        targetName: d.targetName,
+        targetMemberId: d.targetMemberId,
+        at: Date.now(),
+      });
       spawn({
         id: nextId('l'),
         emoji: d.emoji,
@@ -193,6 +207,7 @@ export default function EmojiReactionOverlay({
         senderAvatar: meAvatar,
         targetName: d.targetName,
         targetAvatar: d.targetAvatar,
+        targetMemberId: d.targetMemberId,
         mine: true,
       });
     };
@@ -216,7 +231,13 @@ export default function EmojiReactionOverlay({
       seen.current.add(r.id);
       const mine = !!meId && r.senderId === meId;
       if (mine) {
-        const idx = pending.current.findIndex((p) => p.emoji === r.emoji && p.kind === r.kind);
+        const idx = pending.current.findIndex(
+          (p) =>
+            p.emoji === r.emoji &&
+            p.kind === r.kind &&
+            (!p.targetMemberId || !r.targetMemberId || p.targetMemberId === r.targetMemberId) &&
+            (!p.targetName || !r.targetMemberName || p.targetName === r.targetMemberName)
+        );
         if (idx >= 0) {
           pending.current.splice(idx, 1);
           continue;

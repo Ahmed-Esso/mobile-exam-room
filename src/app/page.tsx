@@ -28,6 +28,8 @@ export default function HomePage() {
   const { room, me, account, error, clearError } = api;
   const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [layout, setLayout] = useState<LayoutPreferences>(DEFAULT_LAYOUT);
+  const apiRef = useRef(api);
+  apiRef.current = api;
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -44,6 +46,51 @@ export default function HomePage() {
     };
     window.addEventListener(LAYOUT_EVENT, onLayout);
 
+    const handleOpenRoomInvite = (rawCode?: string, inviteId?: string) => {
+      const cleanCode = (rawCode ?? '')
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 6);
+      if (cleanCode.length !== 6) return;
+
+      setInviteCode(cleanCode);
+      const currentApi = apiRef.current;
+      const curAcc = currentApi.account;
+      const prof = readProfile();
+      const joinAvatar = curAcc?.avatar || prof?.avatar || AVATAR_OPTIONS[0];
+      const joinName = curAcc?.name || prof?.name || '';
+
+      if (inviteId) {
+        void currentApi.dismissRoomInvite(inviteId);
+      } else {
+        const match = curAcc?.invites?.find((inv) => inv.roomCode === cleanCode);
+        if (match) void currentApi.dismissRoomInvite(match.id);
+      }
+
+      if (joinName.trim() || curAcc) {
+        void currentApi.joinRoom({
+          code: cleanCode,
+          name: joinName.trim() || autoName(joinAvatar),
+          avatar: joinAvatar,
+        });
+      }
+    };
+
+    const onWindowInvite = (e: Event) => {
+      const detail = (e as CustomEvent<{ roomCode?: string; inviteId?: string }>).detail;
+      handleOpenRoomInvite(detail?.roomCode, detail?.inviteId);
+    };
+    window.addEventListener('exam:open-room-invite', onWindowInvite);
+
+    const onSwMessage = (e: MessageEvent) => {
+      const data = e.data as { type?: string; roomCode?: string; inviteId?: string } | null;
+      if (data?.type === 'OPEN_ROOM_INVITE') {
+        handleOpenRoomInvite(data.roomCode, data.inviteId);
+      }
+    };
+    navigator.serviceWorker?.addEventListener('message', onSwMessage);
+
     try {
       const params = new URLSearchParams(window.location.search);
       const roomParam = params
@@ -59,7 +106,11 @@ export default function HomePage() {
       /* ignore URL/storage access issues */
     }
 
-    return () => window.removeEventListener(LAYOUT_EVENT, onLayout);
+    return () => {
+      window.removeEventListener(LAYOUT_EVENT, onLayout);
+      window.removeEventListener('exam:open-room-invite', onWindowInvite);
+      navigator.serviceWorker?.removeEventListener('message', onSwMessage);
+    };
   }, []);
 
   const activeInvites: RoomInvite[] = (account?.invites ?? []).filter(

@@ -110,6 +110,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
   const sendFriendInvite = async (friendUsername: string) => {
     setInvitingUsername(friendUsername);
     haptic(8);
+    playTapSound();
     const ok = await api.inviteFriendToRoom(friendUsername);
     setInvitingUsername(null);
     if (ok) {
@@ -325,6 +326,13 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                     );
                     const invited = invitedUsernames[f.username];
                     const sending = invitingUsername === f.username;
+                    const status = api.friendPresence?.[f.username.toLowerCase()];
+                    const dotColor =
+                      status === 'online'
+                        ? 'var(--lime)'
+                        : status === 'weak'
+                        ? 'var(--amber)'
+                        : 'var(--faint)';
                     return (
                       <button
                         key={f.username}
@@ -333,15 +341,25 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                         onClick={() => void sendFriendInvite(f.username)}
                         className="chip !h-7 !min-h-0 shrink-0 !px-2 text-[11px]"
                         data-active={invited}
+                        title={`@${f.username} (${status ?? 'offline'})`}
                       >
-                        <AnimalAvatarArt emoji={f.avatar || '🐥'} size={16} />
+                        <span className="relative inline-flex shrink-0">
+                          <AnimalAvatarArt emoji={f.avatar || '🐥'} size={16} />
+                          <span
+                            className="absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 rounded-full ring-1 ring-[var(--surface-2)]"
+                            style={{ background: dotColor }}
+                            aria-label={status ?? 'offline'}
+                          />
+                        </span>
                         <span className="max-w-[90px] truncate">@{f.username}</span>
                         {alreadyInRoom ? (
                           <span className="text-[10px] text-[var(--lime)]">In</span>
                         ) : sending ? (
                           <Loader2 size={11} className="animate-spin" />
                         ) : invited ? (
-                          <Check size={11} />
+                          <span className="inline-flex items-center gap-0.5 font-semibold">
+                            Sent <Check size={11} />
+                          </span>
                         ) : (
                           <Send size={10} className="text-[var(--lime)]" />
                         )}

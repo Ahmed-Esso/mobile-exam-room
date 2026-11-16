@@ -105,6 +105,7 @@ export default function ContextualReactStrip({ api, room }: { api: UseRoomReturn
       kind,
       targetName: active.member.name,
       targetAvatar: active.member.avatar,
+      targetMemberId: active.member.id,
     });
     void api.sendReaction({
       emoji: q.emoji,
