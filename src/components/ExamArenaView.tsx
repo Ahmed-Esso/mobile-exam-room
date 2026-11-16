@@ -11,7 +11,6 @@ import {
   Hourglass,
   Infinity as InfinityIcon,
   LogOut,
-  Sparkles,
   Trophy,
   Users,
   X,
@@ -19,7 +18,6 @@ import {
 } from 'lucide-react';
 import type { UseRoomReturn } from '@/types/exam';
 import { LETTERS, Markdown, MemberTag, formatSeconds, haptic } from './ui';
-import AnimalAvatarArt from './AnimalAvatarArt';
 import MemberStrip from './MemberStrip';
 import ContextualReactStrip from './ContextualReactStrip';
 import ReactionDock from './ReactionDock';
@@ -47,6 +45,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
   const [justBurst, setJustBurst] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [pressedNext, setPressedNext] = useState(false);
+  const [expandedExpl, setExpandedExpl] = useState<Record<number, boolean>>({});
   const prevRevealedRef = useRef<boolean>(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -60,6 +59,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
     setOptimisticOption(null);
     setJustBurst(false);
     setPressedNext(false);
+    setExpandedExpl({});
     prevRevealedRef.current = false;
     scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   }, [qIdx]);
@@ -89,15 +89,6 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
     const id = window.setInterval(tick, 250);
     return () => window.clearInterval(id);
   }, [active, timerOn, startedAt, timeLimit]);
-
-  const breakdown = useMemo(() => {
-    if (!room || !currentQuestion) return { right: [], wrong: [] };
-    const right = room.members
-      .filter((m) => m.answers[qIdx]?.isCorrect === true)
-      .sort((a, b) => (a.answers[qIdx]?.timeMs ?? 0) - (b.answers[qIdx]?.timeMs ?? 0));
-    const wrong = room.members.filter((m) => m.answers[qIdx] !== undefined && m.answers[qIdx]?.isCorrect === false);
-    return { right, wrong };
-  }, [room, currentQuestion, qIdx]);
 
   if (!room || !currentQuestion) return null;
 
@@ -339,7 +330,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
             ) : null}
           </article>
 
-          {/* Options + member tags + inline (NotebookLM-style) explanations */}
+          {/* Options + compact member tags + clean inline explanations */}
           <section aria-label="Answer options" className={`space-y-2.5 ${justBurst ? 'burst' : ''}`}>
             {currentQuestion.options.map((optText, idx) => {
               const isSelected = chosenOption === idx;
@@ -356,16 +347,25 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
               }
 
               const expl = isAnswerRevealedToMe ? optionExplanation(idx, isCorrectOption, isSelected) : null;
+              const showExpl = !!expl && (isCorrectOption || isSelected || !!expandedExpl[idx]);
+              const canToggleExpl = isAnswerRevealedToMe && !!expl && !isCorrectOption && !isSelected;
 
               return (
                 <button
                   key={idx}
                   type="button"
-                  disabled={hasLockedIn || isAnswerRevealedToMe}
-                  onClick={() => void handleSelectOption(idx)}
+                  disabled={!canToggleExpl && (hasLockedIn || isAnswerRevealedToMe)}
+                  onClick={() => {
+                    if (canToggleExpl) {
+                      haptic(4);
+                      setExpandedExpl((prev) => ({ ...prev, [idx]: !prev[idx] }));
+                    } else {
+                      void handleSelectOption(idx);
+                    }
+                  }}
                   data-state={state}
                   className="option p-3.5"
-                  style={state === 'dim' && expl ? { opacity: 0.78 } : undefined}
+                  style={state === 'dim' && showExpl ? { opacity: 0.84 } : undefined}
                 >
                   <div className="flex items-start gap-3">
                     <span className="letter mt-0.5">{LETTERS[idx] ?? idx + 1}</span>
@@ -395,7 +395,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
 
                       {tags.length > 0 ? (
                         <div
-                          className="mt-2.5 flex flex-wrap items-center gap-1.5"
+                          className="mt-2 flex flex-wrap items-center gap-1"
                           aria-label={`Picked by ${tags.map((t) => t.name).join(', ')}`}
                         >
                           {tags.map((tag, tIdx) => (
@@ -404,24 +404,8 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
                         </div>
                       ) : null}
 
-                      {expl ? (
-                        <div
-                          className="rise mt-2.5 rounded-xl px-3 py-2 text-xs leading-relaxed text-[var(--muted)]"
-                          style={{
-                            background: 'rgba(0,0,0,0.28)',
-                            boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.35)',
-                            animationDelay: '240ms',
-                          }}
-                        >
-                          <span
-                            className="mb-0.5 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider"
-                            style={{
-                              color: isCorrectOption ? 'var(--lime)' : isSelected ? 'var(--coral)' : 'var(--faint)',
-                            }}
-                          >
-                            <Sparkles size={11} />
-                            {isCorrectOption ? 'Why it’s right' : expl.pointer ? 'Your pick' : 'Why not'}
-                          </span>
+                      {showExpl && expl ? (
+                        <div className="rise mt-2 border-t border-white/10 pt-1.5 text-[13px] leading-snug text-[var(--paper)]/85">
                           <Markdown source={expl.text} />
                         </div>
                       ) : null}
@@ -437,7 +421,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
             <div className="flex items-center justify-between gap-2 rounded-2xl bg-[var(--surface)] px-4 py-2.5 text-xs shadow-[0_0_0_1px_var(--line)]">
               <span className="flex min-w-0 items-center gap-2 text-[var(--muted)]">
                 <Zap size={14} className="shrink-0 text-[var(--amber)]" />
-                <span className="truncate">Still racing: {waitingOnMembers.map((m) => `${m.avatar} ${m.name}`).join(', ')}</span>
+                <span className="truncate">Still racing: {waitingOnMembers.map((m) => m.name).join(', ')}</span>
               </span>
               <button
                 type="button"
@@ -454,94 +438,6 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
 
           {/* Slim contextual reactions */}
           {isAnswerRevealedToMe ? <ContextualReactStrip api={api} room={room} /> : null}
-
-          {/* Round summary: outcome, takeaway, who got it */}
-          <div className="expander" data-open={isAnswerRevealedToMe}>
-            <div>
-              <section className="panel p-3.5">
-                {myCurrentAnswer ? (
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2.5">
-                      <span
-                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl"
-                        style={{ background: myCurrentAnswer.isCorrect ? 'var(--lime)' : 'var(--coral)', color: 'var(--ink)' }}
-                      >
-                        {myCurrentAnswer.isCorrect ? <Check size={17} strokeWidth={3} /> : <X size={17} strokeWidth={3} />}
-                      </span>
-                      <div>
-                        <p className="font-display text-sm font-bold">
-                          {myCurrentAnswer.isCorrect ? 'Spot on' : `The answer was ${LETTERS[currentQuestion.correctIndex]}`}
-                        </p>
-                        <p className="text-xs text-[var(--muted)] tabular">
-                          {formatSeconds(myCurrentAnswer.timeMs)}
-                          {myCurrentAnswer.speedBonus > 0 ? ` · +${myCurrentAnswer.speedBonus} bonus` : ''}
-                        </p>
-                      </div>
-                    </div>
-                    <span
-                      className="code-cell text-base font-extrabold tabular"
-                      style={{ color: myCurrentAnswer.isCorrect ? 'var(--lime)' : 'var(--coral)' }}
-                    >
-                      +{myCurrentAnswer.pointsEarned}
-                    </span>
-                  </div>
-                ) : null}
-
-                {hasPerOption && currentQuestion.explanation ? (
-                  <div className="mt-3 rounded-xl bg-[var(--ink-2)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
-                    <span className="mb-0.5 block text-[10px] font-bold uppercase tracking-wider text-[var(--lime)]">Key takeaway</span>
-                    <Markdown source={currentQuestion.explanation} />
-                  </div>
-                ) : null}
-
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <div className="rounded-xl bg-[var(--ink-2)] p-2.5 shadow-[0_0_0_1px_var(--line)]">
-                    <p className="text-[11px] font-bold text-[var(--lime)]">Got it ({breakdown.right.length})</p>
-                    {breakdown.right.length > 0 ? (
-                      <ul className="mt-1.5 space-y-1">
-                        {breakdown.right.map((m, i) => (
-                          <li key={m.id} className="flex items-center justify-between gap-1 text-xs">
-                            <span className="flex min-w-0 items-center gap-1.5 font-semibold">
-                              <AnimalAvatarArt emoji={m.avatar} size={16} />
-                              <span className="truncate">{m.id === me?.id ? 'You' : m.name}</span>
-                              {i === 0 && room.mode === 'race' ? (
-                                <span className="rounded bg-[var(--amber)] px-1 text-[9px] font-extrabold text-[var(--ink)]">1ST</span>
-                              ) : null}
-                            </span>
-                            <span className="code-cell shrink-0 text-[11px] text-[var(--lime)] tabular">
-                              +{m.answers[qIdx]?.pointsEarned ?? 0}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="mt-1 text-xs text-[var(--faint)]">Nobody this time</p>
-                    )}
-                  </div>
-                  <div className="rounded-xl bg-[var(--ink-2)] p-2.5 shadow-[0_0_0_1px_var(--line)]">
-                    <p className="text-[11px] font-bold text-[var(--coral)]">Missed ({breakdown.wrong.length})</p>
-                    {breakdown.wrong.length > 0 ? (
-                      <ul className="mt-1.5 space-y-1">
-                        {breakdown.wrong.map((m) => (
-                          <li key={m.id} className="flex items-center justify-between gap-1 text-xs">
-                            <span className="flex min-w-0 items-center gap-1.5 font-medium text-[var(--muted)]">
-                              <AnimalAvatarArt emoji={m.avatar} size={16} />
-                              <span className="truncate">{m.id === me?.id ? 'You' : m.name}</span>
-                            </span>
-                            <span className="code-cell shrink-0 rounded bg-[var(--surface-3)] px-1.5 text-[10px] font-bold text-[var(--muted)]">
-                              {LETTERS[m.answers[qIdx]?.optionIndex ?? 0]}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="mt-1 text-xs text-[var(--faint)]">Clean sweep</p>
-                    )}
-                  </div>
-                </div>
-              </section>
-            </div>
-          </div>
         </div>
       </div>
 

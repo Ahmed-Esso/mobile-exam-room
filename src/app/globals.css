@@ -436,11 +436,11 @@ textarea {
 .member-tag {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 9px 0 4px;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px 0 3px;
   border-radius: 99px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
   background: rgba(243, 241, 234, 0.08);
@@ -452,11 +452,11 @@ textarea {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   border-radius: 99px;
   background: rgba(0, 0, 0, 0.3);
-  font-size: 12px;
+  font-size: 11px;
 }
 .member-tag[data-me='true'] {
   background: var(--paper);
@@ -880,13 +880,13 @@ textarea {
    App Layout Scale & Density Preferences
    -------------------------------------------------------------------------- */
 html[data-scale='sm'] {
-  font-size: 14px;
+  font-size: 15.5px;
 }
 html[data-scale='md'] {
-  font-size: 15px;
+  font-size: 16.5px;
 }
 html[data-scale='lg'] {
-  font-size: 16px;
+  font-size: 18px;
 }
 
 .phone[data-density='compact'] .panel {
@@ -909,12 +909,26 @@ html[data-scale='lg'] {
   border-radius: 16px;
 }
 
-.phone[data-density='comfortable'] .panel {
+.phone[data-density='balanced'] .panel {
+  border-radius: 22px;
+}
+.phone[data-density='balanced'] .btn {
+  min-height: 48px;
+}
+.phone[data-density='balanced'] .field {
+  min-height: 50px;
+}
+
+.phone[data-density='spacious'] .panel {
   border-radius: 26px;
 }
-.phone[data-density='comfortable'] .btn {
-  min-height: 52px;
-}
-.phone[data-density='comfortable'] .field {
+.phone[data-density='spacious'] .btn {
   min-height: 54px;
+  padding: 0 20px;
+}
+.phone[data-density='spacious'] .field {
+  min-height: 56px;
+}
+.phone[data-density='spacious'] .option {
+  border-radius: 22px;
 }

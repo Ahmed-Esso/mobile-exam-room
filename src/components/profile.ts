@@ -72,7 +72,7 @@ export function extractRoomCode(raw: string): string | null {
 /* App layout density & UI scale preferences                                  */
 /* -------------------------------------------------------------------------- */
 
-export type LayoutDensity = 'compact' | 'normal' | 'comfortable';
+export type LayoutDensity = 'compact' | 'balanced' | 'spacious';
 export type LayoutScale = 'sm' | 'md' | 'lg';
 
 export interface LayoutPreferences {
@@ -84,7 +84,7 @@ export const LAYOUT_STORAGE_KEY = 'exam_room_layout_v1';
 export const LAYOUT_EVENT = 'exam-room-layout-updated';
 
 export const DEFAULT_LAYOUT: LayoutPreferences = {
-  density: 'compact',
+  density: 'balanced',
   scale: 'md',
 };
 
@@ -92,10 +92,14 @@ export function readLayout(): LayoutPreferences {
   try {
     const raw = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
     if (!raw) return DEFAULT_LAYOUT;
-    const parsed = JSON.parse(raw) as Partial<LayoutPreferences>;
+    const parsed = JSON.parse(raw) as { density?: string; scale?: string };
     const density: LayoutDensity =
-      parsed.density === 'compact' || parsed.density === 'normal' || parsed.density === 'comfortable'
-        ? parsed.density
+      parsed.density === 'compact'
+        ? 'compact'
+        : parsed.density === 'spacious' || parsed.density === 'comfortable'
+        ? 'spacious'
+        : parsed.density === 'balanced' || parsed.density === 'normal'
+        ? 'balanced'
         : DEFAULT_LAYOUT.density;
     const scale: LayoutScale =
       parsed.scale === 'sm' || parsed.scale === 'md' || parsed.scale === 'lg'

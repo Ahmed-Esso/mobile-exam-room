@@ -223,7 +223,7 @@ export default function RoomLobby({ api }: { api: UseRoomReturn }) {
                   >
                     <Avatar
                       emoji={m.avatar}
-                      size={44}
+                      size={38}
                       host={m.id === room.hostId}
                       badge={m.statusBadge}
                       ring={

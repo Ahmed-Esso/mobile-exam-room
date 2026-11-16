@@ -305,8 +305,8 @@ export default function ProfileEditSheet({
                 {(
                   [
                     { id: 'compact', label: 'Compact' },
-                    { id: 'normal', label: 'Balanced' },
-                    { id: 'comfortable', label: 'Spacious' },
+                    { id: 'balanced', label: 'Balanced' },
+                    { id: 'spacious', label: 'Spacious' },
                   ] as { id: LayoutDensity; label: string }[]
                 ).map((opt) => {
                   const active = layout.density === opt.id;
@@ -335,9 +335,9 @@ export default function ProfileEditSheet({
               <div className="mt-1.5 grid grid-cols-3 gap-1.5">
                 {(
                   [
-                    { id: 'sm', label: 'Small (90%)' },
-                    { id: 'md', label: 'Default (95%)' },
-                    { id: 'lg', label: 'Large (100%)' },
+                    { id: 'sm', label: 'Small (97%)' },
+                    { id: 'md', label: 'Default (103%)' },
+                    { id: 'lg', label: 'Large (112%)' },
                   ] as { id: LayoutScale; label: string }[]
                 ).map((opt) => {
                   const active = layout.scale === opt.id;

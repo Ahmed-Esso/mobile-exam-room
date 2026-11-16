@@ -502,22 +502,7 @@ export default function ResultsView({ api }: { api: UseRoomReturn }) {
                                         </div>
                                       ) : null}
                                       {perOptionExpl || showFallbackHere ? (
-                                        <div
-                                          className="mt-2 rounded-xl px-2.5 py-2 text-xs leading-relaxed text-[var(--muted)]"
-                                          style={{
-                                            background: 'rgba(0,0,0,0.28)',
-                                            boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.35)',
-                                          }}
-                                        >
-                                          <span
-                                            className="mb-0.5 flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider"
-                                            style={{
-                                              color: isCorrect ? 'var(--lime)' : 'var(--faint)',
-                                            }}
-                                          >
-                                            <Sparkles size={11} />
-                                            {isCorrect ? 'Why it’s right' : 'Why not'}
-                                          </span>
+                                        <div className="mt-1.5 border-t border-white/10 pt-1.5 text-xs leading-snug text-[var(--paper)]/85">
                                           <Markdown source={perOptionExpl || q.explanation} />
                                         </div>
                                       ) : null}
