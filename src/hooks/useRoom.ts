@@ -2530,13 +2530,19 @@ export function useRoom(): UseRoomReturn {
       const activeMemberId = memberId || getOrCreateLocalMemberId();
       if (!currentRoom || currentRoom.status !== 'active') return;
 
+      const targetQIdx = currentRoom.currentQuestionIndex;
+      const myMember = currentRoom.members.find((m) => m.id === activeMemberId);
+      if (myMember && myMember.answers[targetQIdx] !== undefined) {
+        return;
+      }
+
       const now = Date.now();
       lastLocalMutationAtRef.current = now;
       const delta: RoomDelta = {
         t: 'ans',
         id: `ans-${now}-${Math.random().toString(36).slice(2, 6)}`,
         m: activeMemberId,
-        q: currentRoom.currentQuestionIndex,
+        q: targetQIdx,
         o: optionIndex,
         ts: now,
       };
@@ -2545,7 +2551,10 @@ export function useRoom(): UseRoomReturn {
       if (roomRef.current) {
         publishMqttState(roomRef.current, false);
       }
-      enqueueRoomAction('submitAnswer', { optionIndex });
+      enqueueRoomAction('submitAnswer', {
+        optionIndex,
+        questionIndex: targetQIdx,
+      });
     },
     [memberId, applyDeltaToRoom, publishMqttDelta, publishMqttState, enqueueRoomAction]
   );
@@ -2559,13 +2568,22 @@ export function useRoom(): UseRoomReturn {
     const activeMemberId = memberId || getOrCreateLocalMemberId();
     if (!currentRoom || currentRoom.status !== 'active') return;
 
+    const targetQIdx = currentRoom.currentQuestionIndex;
+    const myMember = currentRoom.members.find((m) => m.id === activeMemberId);
+    if (
+      myMember &&
+      (myMember.readyForNextQuestionIndex ?? -1) >= targetQIdx
+    ) {
+      return;
+    }
+
     const now = Date.now();
     lastLocalMutationAtRef.current = now;
     const delta: RoomDelta = {
       t: 'next',
       id: `nxt-${now}-${Math.random().toString(36).slice(2, 6)}`,
       m: activeMemberId,
-      q: currentRoom.currentQuestionIndex,
+      q: targetQIdx,
       ts: now,
     };
     applyDeltaToRoom(delta);
@@ -2573,7 +2591,7 @@ export function useRoom(): UseRoomReturn {
     if (roomRef.current) {
       publishMqttState(roomRef.current, false);
     }
-    enqueueRoomAction('nextQuestion', {});
+    enqueueRoomAction('nextQuestion', { questionIndex: targetQIdx });
   }, [memberId, applyDeltaToRoom, publishMqttDelta, publishMqttState, enqueueRoomAction]);
 
   const resetRoom = useCallback(

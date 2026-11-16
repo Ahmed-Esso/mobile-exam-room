@@ -49,15 +49,17 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
     waitingOnNextMembers,
   } = api;
 
-  const [optimisticOption, setOptimisticOption] = useState<number | null>(null);
+  const [optimisticPick, setOptimisticPick] = useState<{ q: number; optionIndex: number } | null>(null);
   const [remainingSec, setRemainingSec] = useState<number>(0);
   const [justBurst, setJustBurst] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
-  const [pressedNext, setPressedNext] = useState(false);
+  const [pressedNextForQ, setPressedNextForQ] = useState<number | null>(null);
   const [playersOpen, setPlayersOpen] = useState(false);
   const [expandedExpl, setExpandedExpl] = useState<Record<number, boolean>>({});
   const prevRevealedRef = useRef<boolean>(false);
   const prevQIdxRef = useRef<number>(-1);
+  const nextTapLockRef = useRef<{ q: number; at: number } | null>(null);
+  const optionTapLockRef = useRef<{ q: number; at: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const qIdx = room?.currentQuestionIndex ?? 0;
@@ -74,9 +76,9 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
     } else if (prev >= 0 && qIdx > prev) {
       playNextQuestionSound();
     }
-    setOptimisticOption(null);
+    setOptimisticPick(null);
     setJustBurst(false);
-    setPressedNext(false);
+    setPressedNextForQ(null);
     setExpandedExpl({});
     prevRevealedRef.current = false;
     scrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -115,6 +117,7 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
 
   if (!room || !currentQuestion) return null;
 
+  const optimisticOption = optimisticPick?.q === qIdx ? optimisticPick.optionIndex : null;
   const chosenOption = myCurrentAnswer ? myCurrentAnswer.optionIndex : optimisticOption;
   const hasLockedIn = myCurrentAnswer !== null || optimisticOption !== null;
   const isLastQuestion = qIdx + 1 >= totalQ;
@@ -122,11 +125,17 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
   const timerLow = timerOn && !isAnswerRevealedToMe && remainingSec <= 7;
   const optionExplanations = currentQuestion.optionExplanations;
   const hasPerOption = !!optionExplanations && optionExplanations.some((e) => e && e.trim());
+  const pressedNext = pressedNextForQ === qIdx;
   const readyForNext = myReadyForNext || pressedNext;
 
   const handleSelectOption = async (idx: number) => {
     if (hasLockedIn || isAnswerRevealedToMe) return;
-    setOptimisticOption(idx);
+    if (optionTapLockRef.current?.q === qIdx) return;
+    const now = Date.now();
+    if (nextTapLockRef.current && now - nextTapLockRef.current.at < 350) return;
+
+    optionTapLockRef.current = { q: qIdx, at: now };
+    setOptimisticPick({ q: qIdx, optionIndex: idx });
     haptic(12);
     playLockSound();
     await api.submitAnswer(idx);
@@ -134,9 +143,14 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
 
   const pressNext = () => {
     if (readyForNext) return;
+    const now = Date.now();
+    if (nextTapLockRef.current?.q === qIdx) return;
+    if (nextTapLockRef.current && now - nextTapLockRef.current.at < 450) return;
+
+    nextTapLockRef.current = { q: qIdx, at: now };
     haptic([10, 30, 10]);
     playTapSound();
-    setPressedNext(true);
+    setPressedNextForQ(qIdx);
     void api.nextQuestion();
   };
 
@@ -173,7 +187,12 @@ export default function ExamArenaView({ api }: { api: UseRoomReturn }) {
         </span>
       </div>
     ) : (
-      <button type="button" onClick={pressNext} className="btn-primary h-12 w-full text-[15px]">
+      <button
+        type="button"
+        disabled={readyForNext}
+        onClick={pressNext}
+        className="btn-primary h-12 w-full text-[15px]"
+      >
         {isLastQuestion ? (
           <>
             <Trophy size={18} /> See the podium

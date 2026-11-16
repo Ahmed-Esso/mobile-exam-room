@@ -304,9 +304,10 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
     );
   }
 
-  // Mutual Next Question Gate check inside CRDT merge
-  if (
+  // Mutual Next Question Gate check inside CRDT merge (loop-guarded by mergedQuestions.length)
+  while (
     mergedStatus === 'active' &&
+    mergedQuestions.length > 0 &&
     mergedMembers.length > 0 &&
     mergedMembers.every(
       (m) => (m.readyForNextQuestionIndex ?? -1) >= mergedQuestionIndex
@@ -322,6 +323,7 @@ export function mergeRoomStates(a: RoomState, b: RoomState): RoomState {
       mergedForceRevealed = -1;
     } else {
       mergedStatus = 'finished';
+      break;
     }
   }
 
@@ -460,9 +462,15 @@ function recordMemberAnswerInternal(
   room: RoomState,
   member: Member,
   optionIndex: number,
-  answeredAt: number
+  answeredAt: number,
+  targetQuestionIndex?: number
 ): boolean {
-  const qIdx = room.currentQuestionIndex;
+  const qIdx =
+    typeof targetQuestionIndex === 'number' &&
+    Number.isFinite(targetQuestionIndex)
+      ? Math.trunc(targetQuestionIndex)
+      : room.currentQuestionIndex;
+  if (qIdx < 0 || qIdx >= room.questions.length) return false;
   const currentQ = room.questions[qIdx];
   if (!currentQ) return false;
 
@@ -504,9 +512,10 @@ function recordMemberAnswerInternal(
     member.streak = 0;
   }
 
+  const activeQIdx = room.currentQuestionIndex;
   const allAnswered =
     room.members.length > 0 &&
-    room.members.every((m) => m.answers[qIdx] !== undefined);
+    room.members.every((m) => m.answers[activeQIdx] !== undefined);
 
   // Collective anti-spoiler reveal for both Wait and Race modes
   room.isRevealed = allAnswered;
@@ -903,8 +912,19 @@ export function mutateRoomInStore(
 
     case 'submitAnswer': {
       const optionIndex = Number(payload.optionIndex ?? 0);
+      const rawQ = payload.questionIndex;
+      const targetQIdx =
+        typeof rawQ === 'number' && Number.isFinite(rawQ)
+          ? Math.trunc(rawQ)
+          : undefined;
       if (actingMember && room.status === 'active') {
-        recordMemberAnswerInternal(room, actingMember, optionIndex, now);
+        recordMemberAnswerInternal(
+          room,
+          actingMember,
+          optionIndex,
+          now,
+          targetQIdx
+        );
       }
       break;
     }
@@ -916,24 +936,39 @@ export function mutateRoomInStore(
 
     case 'nextQuestion': {
       if (room.status === 'active') {
+        const rawQ = payload.questionIndex;
+        const targetQIdx =
+          typeof rawQ === 'number' && Number.isFinite(rawQ)
+            ? Math.trunc(rawQ)
+            : room.currentQuestionIndex;
+
         if (actingMember) {
-          actingMember.readyForNextQuestionIndex = room.currentQuestionIndex;
+          actingMember.readyForNextQuestionIndex = Math.max(
+            actingMember.readyForNextQuestionIndex ?? -1,
+            targetQIdx
+          );
           actingMember.lastSeenAt = now;
         }
-        const qIdx = room.currentQuestionIndex;
-        const allReadyForNext =
-          room.members.length > 0 &&
-          room.members.every((m) => (m.readyForNextQuestionIndex ?? -1) >= qIdx);
 
-        if (allReadyForNext) {
-          if (room.currentQuestionIndex + 1 < room.questions.length) {
-            room.currentQuestionIndex += 1;
-            room.questionStartedAt = now;
-            room.forceRevealedQuestionIndex = -1;
-            room.isRevealed = false;
-          } else {
-            room.status = 'finished';
-            room.isRevealed = true;
+        // Only advance when the requested questionIndex matches the active questionIndex
+        if (targetQIdx === room.currentQuestionIndex) {
+          const qIdx = room.currentQuestionIndex;
+          const allReadyForNext =
+            room.members.length > 0 &&
+            room.members.every(
+              (m) => (m.readyForNextQuestionIndex ?? -1) >= qIdx
+            );
+
+          if (allReadyForNext) {
+            if (room.currentQuestionIndex + 1 < room.questions.length) {
+              room.currentQuestionIndex += 1;
+              room.questionStartedAt = now;
+              room.forceRevealedQuestionIndex = -1;
+              room.isRevealed = false;
+            } else {
+              room.status = 'finished';
+              room.isRevealed = true;
+            }
           }
         }
         room.version += 1;
