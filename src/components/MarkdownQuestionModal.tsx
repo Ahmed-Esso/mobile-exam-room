@@ -56,6 +56,7 @@ export default function MarkdownQuestionModal({
   onClose: () => void;
   api: UseRoomReturn;
 }) {
+  const [studioTab, setStudioTab] = useState<'markdown' | 'ai'>('markdown');
   const [markdown, setMarkdown] = useState('');
   const [debounced, setDebounced] = useState('');
   const [title, setTitle] = useState('');
@@ -64,9 +65,9 @@ export default function MarkdownQuestionModal({
   const [apiKey, setApiKey] = useState('');
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const [expanded, setExpanded] = useState<number | null>(0);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
-  const [promptPreviewOpen, setPromptPreviewOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const mdFileRef = useRef<HTMLInputElement>(null);
   const mediaFileRef = useRef<HTMLInputElement>(null);
@@ -98,7 +99,7 @@ export default function MarkdownQuestionModal({
       return {
         questions: [],
         source: 'markdown' as const,
-        warnings: ['The parser could not read this Markdown.'],
+        warnings: ['Could not parse this Markdown.'],
       };
     }
   }, [debounced]);
@@ -116,7 +117,6 @@ export default function MarkdownQuestionModal({
     setMarkdown(md);
     setDebounced(md);
     if (t) setTitle(t);
-    setExpanded(0);
     setResult(null);
   };
 
@@ -171,6 +171,7 @@ export default function MarkdownQuestionModal({
         base64Data,
         sizeBytes: file.size,
       });
+
       if (!title.trim()) {
         setTitle(
           file.name
@@ -215,23 +216,24 @@ export default function MarkdownQuestionModal({
         if (res && res.questions.length) {
           setResult({
             ok: true,
-            text: `${res.questions.length} questions loaded${
-              res.source === 'gemini'
-                ? ' with Gemini AI (LaTeX & option explanations ready)'
-                : ' with the built-in parser'
-            }.`,
+            text: `Loaded ${res.questions.length} questions`,
           });
-          window.setTimeout(onClose, 850);
+          setTimeout(onClose, 380);
         } else {
           setResult({
             ok: false,
-            text: api.error || 'Could not extract questions. Check your Gemini key and try again.',
+            text: res?.warnings?.[0] ?? 'Could not extract questions.',
           });
         }
-      } else if (preview && preview.questions.length) {
+      } else if (preview && preview.questions.length > 0) {
         await api.setQuestions(preview.questions, title.trim() || undefined);
-        setResult({ ok: true, text: `${preview.questions.length} questions loaded.` });
-        window.setTimeout(onClose, 650);
+        setResult({ ok: true, text: `Loaded ${preview.questions.length} questions` });
+        setTimeout(onClose, 320);
+      } else {
+        setResult({
+          ok: false,
+          text: preview?.warnings?.[0] ?? 'No complete questions detected.',
+        });
       }
     } finally {
       setSaving(false);
@@ -240,427 +242,370 @@ export default function MarkdownQuestionModal({
 
   return (
     <>
-    <Sheet
-      open={open}
-      onClose={onClose}
-      tall
-      title="Question Studio"
-      footer={
-        <div className="space-y-2">
-          {result ? (
-            <p
-              className="rise flex items-center gap-2 text-sm font-medium"
-              style={{ color: result.ok ? 'var(--lime)' : 'var(--coral)' }}
-              role="status"
+      <Sheet
+        open={open}
+        onClose={onClose}
+        tall
+        title="Question Studio"
+        footer={
+          <div className="space-y-2">
+            {result ? (
+              <p
+                className="rise flex items-center gap-2 text-xs font-medium"
+                style={{ color: result.ok ? 'var(--lime)' : 'var(--coral)' }}
+                role="status"
+              >
+                {result.ok ? <Check size={15} /> : <AlertTriangle size={15} />}
+                {result.text}
+              </p>
+            ) : null}
+            <button
+              type="button"
+              className="btn-primary h-12 w-full text-sm"
+              disabled={!canSave || saving}
+              onClick={save}
             >
-              {result.ok ? <Check size={16} /> : <AlertTriangle size={16} />}
-              {result.text}
-            </p>
-          ) : null}
-          <button
-            type="button"
-            className="btn-primary h-14 w-full text-base"
-            disabled={!canSave || saving}
-            onClick={save}
-          >
-            {saving ? (
-              <Loader2 size={20} className="animate-spin" />
-            ) : effectiveUseGemini ? (
-              <Sparkles size={19} />
-            ) : (
-              <Check size={19} strokeWidth={2.6} />
-            )}
-            {saving
-              ? 'Gemini is extracting questions & LaTeX…'
-              : hasAttachments
-              ? `Extract Questions from ${attachments.length} ${
-                  attachments.length === 1 ? 'File' : 'Files'
-                } with Gemini`
-              : effectiveUseGemini
-              ? 'Smart Parse with Gemini AI'
-              : count
-              ? `Use these ${count} questions`
-              : 'Paste Markdown or unlock PDF / Screenshots'}
-          </button>
-        </div>
-      }
-    >
-      {/* 1. Gemini API Key Gate + PDF / Screenshot Upload Card */}
-      <section className="rounded-2xl bg-[var(--surface)] p-4 shadow-[0_0_0_1px_var(--line)]">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <p className="flex items-center gap-1.5 text-sm font-bold text-[var(--paper)]">
-              <Sparkles size={16} className="text-[var(--pink)]" />
-              PDF &amp; Screenshot AI Extractor
-            </p>
-            <p className="mt-0.5 text-xs text-[var(--muted)]">
-              Enter your Gemini API key first to unlock PDF &amp; screenshot uploads.
-            </p>
+              {saving ? (
+                <Loader2 size={18} className="animate-spin" />
+              ) : effectiveUseGemini ? (
+                <Sparkles size={17} />
+              ) : (
+                <Check size={17} strokeWidth={2.6} />
+              )}
+              {saving
+                ? 'Extracting questions…'
+                : hasAttachments
+                ? `Extract from ${attachments.length} ${attachments.length === 1 ? 'file' : 'files'}`
+                : effectiveUseGemini
+                ? 'Smart Parse with Gemini'
+                : count
+                ? `Use ${count} ${count === 1 ? 'question' : 'questions'}`
+                : 'Add questions to continue'}
+            </button>
           </div>
-          <span
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl"
-            style={{
-              background: hasApiKey ? 'rgba(215, 255, 63, 0.16)' : 'rgba(255, 176, 46, 0.14)',
-              color: hasApiKey ? 'var(--lime)' : 'var(--amber)',
-            }}
-          >
-            {hasApiKey ? <Check size={16} /> : <Lock size={15} />}
-          </span>
-        </div>
-
-        {api.geminiApiKey.trim() ? (
-          <div className="mt-3 flex items-center justify-between gap-2 rounded-xl bg-[rgba(215,255,63,0.12)] px-3 py-2 text-xs font-semibold text-[var(--lime)]">
-            <span className="flex items-center gap-1.5">
-              <Check size={14} className="shrink-0" />
-              Gemini API Key loaded from your Profile — PDF &amp; Screenshot upload unlocked!
-            </span>
+        }
+      >
+        <div className="space-y-3 pb-2">
+          {/* Clean 2-Tab Switcher */}
+          <div className="grid grid-cols-2 rounded-xl bg-[var(--ink-2)] p-1 shadow-[0_0_0_1px_var(--line)]">
             <button
               type="button"
               onClick={() => {
                 haptic(5);
-                setProfileOpen(true);
+                setStudioTab('markdown');
               }}
-              className="shrink-0 underline underline-offset-2 opacity-90 hover:opacity-100"
+              className="press flex h-9 items-center justify-center gap-1.5 rounded-lg text-xs font-semibold"
+              style={{
+                background: studioTab === 'markdown' ? 'var(--surface-3)' : 'transparent',
+                color: studioTab === 'markdown' ? 'var(--paper)' : 'var(--muted)',
+              }}
             >
-              Edit Profile
+              <FileText size={13} /> Paste Markdown
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                haptic(5);
+                setStudioTab('ai');
+              }}
+              className="press flex h-9 items-center justify-center gap-1.5 rounded-lg text-xs font-semibold"
+              style={{
+                background: studioTab === 'ai' ? 'var(--surface-3)' : 'transparent',
+                color: studioTab === 'ai' ? 'var(--paper)' : 'var(--muted)',
+              }}
+            >
+              <Sparkles size={13} /> PDF / Image (AI)
+              {hasAttachments ? (
+                <span className="rounded-full bg-[var(--lime)] px-1.5 text-[10px] font-extrabold text-[var(--ink)]">
+                  {attachments.length}
+                </span>
+              ) : null}
             </button>
           </div>
-        ) : null}
 
-        <label htmlFor="gemini-key" className="label mt-3 flex items-center gap-1.5">
-          <KeyRound size={13} /> Gemini API Key
-        </label>
-        <input
-          id="gemini-key"
-          type="password"
-          autoComplete="off"
-          className="field code-cell mt-1.5 text-sm"
-          placeholder="Paste AIza... key to unlock PDF & image uploads"
-          value={apiKey}
-          onChange={(e) => {
-            const val = e.target.value;
-            setApiKey(val);
-            api.setGeminiApiKey(val.trim());
-            try {
-              if (val.trim()) window.localStorage.setItem(KEY_STORAGE, val.trim());
-              else window.localStorage.removeItem(KEY_STORAGE);
-            } catch {
-              /* ignore */
-            }
-          }}
-        />
-
-        <div className="mt-3 rounded-2xl border-2 border-dashed border-[var(--line-strong)] bg-[var(--ink-2)] p-3.5">
-          {!hasApiKey ? (
-            <div className="space-y-2.5">
-              <div className="flex items-center justify-between gap-3">
-                <p className="flex items-center gap-2 text-xs font-semibold text-[var(--amber)]">
-                  <Lock size={14} className="shrink-0" />
-                  Put your Gemini API key first to unlock PDF &amp; Screenshot uploads
-                </p>
-                <button
-                  type="button"
-                  disabled
-                  className="btn-secondary !min-h-[38px] shrink-0 !px-3 text-xs"
-                >
-                  <FileUp size={14} /> Locked
-                </button>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  haptic(6);
-                  setProfileOpen(true);
-                }}
-                className="btn-secondary !min-h-[36px] w-full !rounded-xl text-xs"
-              >
-                <KeyRound size={13} /> Add Gemini API Key in Profile
-              </button>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center justify-between gap-2.5">
-              <div className="min-w-0 flex-1">
-                <p className="text-xs font-semibold text-[var(--paper)]">
-                  Ready for PDFs &amp; Exam Screenshots
-                </p>
-                <p className="text-[11px] text-[var(--muted)]">
-                  Extracts questions, LaTeX math, and per-option explanations.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => mediaFileRef.current?.click()}
-                className="btn-secondary !min-h-[38px] shrink-0 !px-3 text-xs"
-              >
-                <FileUp size={14} /> Upload PDF / Image
-              </button>
-            </div>
-          )}
+          {/* Shared Compact Title Input */}
           <input
-            ref={mediaFileRef}
-            type="file"
-            multiple
-            accept=".pdf,application/pdf,image/png,image/jpeg,image/webp"
-            className="hidden"
-            onChange={(e) => {
-              void handleMediaFiles(e.target.files);
-              e.target.value = '';
-            }}
+            id="studio-title"
+            className="field !min-h-[42px] text-sm"
+            placeholder="Exam title (optional)"
+            aria-label="Exam title"
+            value={title}
+            maxLength={60}
+            onChange={(e) => setTitle(e.target.value)}
           />
 
-          {attachments.length > 0 ? (
-            <div className="mt-3 flex flex-wrap gap-2 border-t border-[var(--line)] pt-2.5">
-              {attachments.map((att, idx) => {
-                const isPdf = att.mimeType === 'application/pdf';
-                return (
-                  <div
-                    key={`${att.name}-${idx}`}
-                    className="pop inline-flex max-w-full items-center gap-2 rounded-xl bg-[var(--surface)] px-2.5 py-1.5 text-xs shadow-[0_0_0_1px_var(--line-strong)]"
+          {studioTab === 'markdown' ? (
+            <div className="space-y-2.5">
+              {/* 1-Row Quick Actions */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void handleCopyPrompt()}
+                  className="chip !h-8 !min-h-0 !px-2.5 text-xs"
+                  data-active={copiedPrompt}
+                >
+                  {copiedPrompt ? <Check size={13} /> : <Copy size={13} />}
+                  {copiedPrompt ? 'Copied! ✓' : 'Copy AI Prompt'}
+                </button>
+                <button
+                  type="button"
+                  className="chip !h-8 !min-h-0 !px-2.5 text-xs"
+                  onClick={() => mdFileRef.current?.click()}
+                >
+                  <FileUp size={13} /> Upload .md
+                </button>
+                <button
+                  type="button"
+                  className="chip !h-8 !min-h-0 !px-2.5 text-xs"
+                  onClick={() => loadTemplate(MARKDOWN_FORMAT_GUIDE, title || 'Sample Exam')}
+                >
+                  <Wand2 size={13} className="text-[var(--lime)]" /> Sample
+                </button>
+                <input
+                  ref={mdFileRef}
+                  type="file"
+                  multiple
+                  accept=".md,.markdown,.txt,text/markdown,text/plain"
+                  className="hidden"
+                  onChange={(e) => {
+                    void handleMarkdownFiles(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
+              </div>
+
+              {/* Clean Markdown Textarea */}
+              <textarea
+                id="studio-md"
+                value={markdown}
+                onChange={(e) => setMarkdown(e.target.value)}
+                spellCheck={false}
+                placeholder={'### 1. Question text?\n- A) Option 1\n- B) Option 2\n**Answer:** A\n**Explanation:** Why A is correct.'}
+                className="field code-cell h-44 resize-none py-2.5 text-xs leading-relaxed"
+              />
+
+              {/* Compact Question Count + Expandable Preview */}
+              {preview ? (
+                <div className="rounded-xl bg-[var(--surface)] shadow-[0_0_0_1px_var(--line)]">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewOpen((v) => !v)}
+                    className="flex w-full items-center justify-between px-3 py-2 text-xs"
                   >
-                    {isPdf ? (
-                      <FileText size={14} className="shrink-0 text-[var(--coral)]" />
-                    ) : (
-                      <ImageIcon size={14} className="shrink-0 text-[var(--peri)]" />
-                    )}
-                    <span className="truncate font-semibold text-[var(--paper)]">{att.name}</span>
-                    {att.sizeBytes ? (
-                      <span className="shrink-0 text-[11px] text-[var(--muted)] tabular">
-                        {formatBytes(att.sizeBytes)}
+                    <span className="flex items-center gap-2 font-semibold">
+                      <span
+                        className="rounded-full px-2 py-0.5 text-[11px] font-bold tabular"
+                        style={{
+                          background: count ? 'var(--lime)' : 'var(--surface-3)',
+                          color: count ? 'var(--ink)' : 'var(--muted)',
+                        }}
+                      >
+                        {count} {count === 1 ? 'question' : 'questions'} ready
+                      </span>
+                    </span>
+                    {count > 0 ? (
+                      <span className="flex items-center gap-1 text-[var(--muted)]">
+                        {previewOpen ? 'Hide' : 'Preview'}
+                        <ChevronDown
+                          size={14}
+                          className={`transition-transform ${previewOpen ? 'rotate-180' : ''}`}
+                        />
                       </span>
                     ) : null}
-                    <button
-                      type="button"
-                      onClick={() => removeAttachment(idx)}
-                      className="press ml-0.5 rounded-full p-0.5 text-[var(--muted)] hover:text-[var(--coral)]"
-                      aria-label={`Remove ${att.name}`}
-                    >
-                      <X size={13} />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          ) : null}
-        </div>
+                  </button>
 
-        {hasApiKey ? (
-          <div className="mt-3 flex items-center justify-between gap-3 px-0.5">
-            <span className="text-xs text-[var(--muted)]">
-              Also parse messy pasted notes with Gemini
-            </span>
-            <Toggle
-              checked={effectiveUseGemini}
-              onChange={setUseGemini}
-              disabled={hasAttachments}
-              label="Gemini smart parse"
-            />
-          </div>
-        ) : null}
-      </section>
+                  {preview.warnings?.length ? (
+                    <p className="border-t border-[var(--line)] px-3 py-2 text-[11px] text-[var(--amber)]">
+                      {preview.warnings[0]}
+                    </p>
+                  ) : null}
 
-      {/* 2. Ready-to-Copy AI Prompt for ChatGPT / Claude / Gemini */}
-      <section className="mt-4 rounded-2xl bg-[var(--surface)] p-3.5 shadow-[0_0_0_1px_var(--line)]">
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0 flex-1">
-            <p className="text-xs font-bold text-[var(--paper)]">
-              Generating questions with ChatGPT / Claude / Gemini?
-            </p>
-            <p className="text-[11px] text-[var(--muted)]">
-              Copy this prompt so your AI outputs ready-to-paste Markdown + LaTeX + per-option explanations.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => void handleCopyPrompt()}
-            className="chip shrink-0 text-xs"
-            data-active={copiedPrompt}
-          >
-            {copiedPrompt ? <Check size={14} /> : <Copy size={14} />}
-            {copiedPrompt ? 'Copied! ✓' : 'Copy AI Prompt'}
-          </button>
-        </div>
-
-        <button
-          type="button"
-          onClick={() => setPromptPreviewOpen((v) => !v)}
-          aria-expanded={promptPreviewOpen}
-          className="mt-2 flex items-center gap-1 text-[11px] font-semibold text-[var(--muted)] hover:text-[var(--paper)]"
-        >
-          <ChevronDown
-            size={13}
-            className={`transition-transform duration-200 ${promptPreviewOpen ? 'rotate-180' : ''}`}
-          />
-          {promptPreviewOpen ? 'Hide prompt preview' : 'Preview prompt'}
-        </button>
-
-        <div className="expander" data-open={promptPreviewOpen}>
-          <div>
-            <pre className="code-cell mt-2 max-h-44 overflow-auto whitespace-pre-wrap rounded-xl bg-[var(--ink-2)] p-3 text-[11px] leading-relaxed text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
-              {AI_PROMPT_FOR_MARKDOWN_QUESTIONS}
-            </pre>
-          </div>
-        </div>
-      </section>
-
-      {/* 3. Title & Markdown Editor (always unlocked, no API key required) */}
-      <label htmlFor="studio-title" className="label mt-4 block">
-        Exam title
-      </label>
-      <input
-        id="studio-title"
-        className="field mt-1.5"
-        placeholder="e.g. Physics & Calculus Review"
-        value={title}
-        maxLength={60}
-        onChange={(e) => setTitle(e.target.value)}
-      />
-
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-        <label htmlFor="studio-md" className="label">
-          Markdown questions (no API key needed)
-        </label>
-        <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            className="chip h-8 min-h-0 px-3 text-xs"
-            onClick={() => mdFileRef.current?.click()}
-          >
-            <FileUp size={13} /> Upload .md
-          </button>
-          <button
-            type="button"
-            className="chip h-8 min-h-0 px-3 text-xs"
-            onClick={() => loadTemplate(MARKDOWN_FORMAT_GUIDE, title || 'Sample Format')}
-          >
-            <Wand2 size={13} className="text-[var(--lime)]" /> Format guide
-          </button>
-        </div>
-        <input
-          ref={mdFileRef}
-          type="file"
-          multiple
-          accept=".md,.markdown,.txt,text/markdown,text/plain"
-          className="hidden"
-          onChange={(e) => {
-            void handleMarkdownFiles(e.target.files);
-            e.target.value = '';
-          }}
-        />
-      </div>
-      <textarea
-        id="studio-md"
-        value={markdown}
-        onChange={(e) => setMarkdown(e.target.value)}
-        spellCheck={false}
-        placeholder={
-          '### 1. What is the derivative of $f(x) = x^3 + 2x$?\n- A) $3x^2 + 2$\n- B) $x^2 + 2$\n- C) $3x + 2$\n- D) $3x^3$\n**Answer:** A\n**Explanation:** Using the power rule $\\frac{d}{dx}(x^n) = nx^{n-1}$.\n- **Explain A:** Correct — the derivative of $x^3$ is $3x^2$ and $2x$ is $2$.\n- **Explain B:** Incorrect — forgot to multiply by the exponent $3$.'
-        }
-        className="field code-cell mt-1.5 h-48 resize-none py-3 text-[13px] leading-relaxed"
-      />
-
-      {/* 4. Live Preview */}
-      <div className="mt-5 flex items-center justify-between">
-        <p className="label">Live Markdown &amp; LaTeX Preview</p>
-        {preview ? (
-          <span
-            key={count}
-            className="pop rounded-full px-2.5 py-1 text-xs font-bold tabular"
-            style={{
-              background: count ? 'var(--lime)' : 'var(--surface-3)',
-              color: count ? 'var(--ink)' : 'var(--muted)',
-            }}
-          >
-            {count} {count === 1 ? 'question' : 'questions'}
-          </span>
-        ) : null}
-      </div>
-
-      {!preview ? (
-        <p className="mt-2 rounded-2xl bg-[var(--surface)] px-4 py-5 text-center text-xs text-[var(--muted)] shadow-[0_0_0_1px_var(--line)]">
-          {hasAttachments
-            ? `${attachments.length} file(s) ready — tap Extract below.`
-            : 'Paste Markdown above or upload a .md file. Parsed questions and LaTeX equations preview here live.'}
-        </p>
-      ) : (
-        <div className="mt-2 space-y-2">
-          {preview.warnings?.length ? (
-            <div className="rounded-2xl bg-[rgba(255,176,46,0.1)] px-4 py-3 text-xs leading-relaxed text-[var(--amber)]">
-              {preview.warnings.slice(0, 3).map((w, i) => (
-                <p key={i} className="flex gap-2">
-                  <AlertTriangle size={14} className="mt-0.5 shrink-0" /> {w}
-                </p>
-              ))}
-            </div>
-          ) : null}
-          {preview.questions.map((q, i) => {
-            const isOpen = expanded === i;
-            return (
-              <div
-                key={q.id || i}
-                className="overflow-hidden rounded-2xl bg-[var(--surface)] shadow-[0_0_0_1px_var(--line)]"
-              >
-                <button
-                  type="button"
-                  className="flex w-full items-start gap-3 px-4 py-3 text-left"
-                  onClick={() => setExpanded(isOpen ? null : i)}
-                  aria-expanded={isOpen}
-                >
-                  <span className="code-cell mt-0.5 text-xs font-bold text-[var(--muted)] tabular">
-                    {String(i + 1).padStart(2, '0')}
-                  </span>
-                  <span className="line-clamp-2 flex-1 text-sm font-medium leading-snug">
-                    <Markdown source={q.prompt} inline />
-                  </span>
-                  <span className="code-cell mt-0.5 rounded-md bg-[var(--lime)] px-1.5 text-xs font-bold text-[var(--ink)]">
-                    {LETTERS[q.correctIndex] ?? '?'}
-                  </span>
-                </button>
-                <div className="expander" data-open={isOpen}>
-                  <div>
-                    <ul className="space-y-1.5 px-4 pb-2">
-                      {q.options.map((opt, oi) => (
-                        <li
-                          key={oi}
-                          className="space-y-0.5 text-[13px]"
-                          style={{
-                            color: oi === q.correctIndex ? 'var(--lime)' : 'var(--muted)',
-                          }}
-                        >
-                          <div className="flex items-start gap-2">
-                            <span className="code-cell mt-0.5 font-bold">{LETTERS[oi]}</span>
-                            <span className="flex-1">
-                              <Markdown source={opt} inline />
-                            </span>
-                            {oi === q.correctIndex ? (
-                              <Check size={14} className="mt-0.5 shrink-0" />
+                  {previewOpen && count > 0 ? (
+                    <div className="space-y-1.5 border-t border-[var(--line)] p-2">
+                      {preview.questions.map((q, i) => {
+                        const isOpen = expanded === i;
+                        return (
+                          <div
+                            key={q.id || i}
+                            className="overflow-hidden rounded-xl bg-[var(--ink-2)] shadow-[0_0_0_1px_var(--line)]"
+                          >
+                            <button
+                              type="button"
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs"
+                              onClick={() => setExpanded(isOpen ? null : i)}
+                              aria-expanded={isOpen}
+                            >
+                              <span className="code-cell font-bold text-[var(--muted)] tabular">
+                                {String(i + 1).padStart(2, '0')}
+                              </span>
+                              <span className="line-clamp-1 flex-1 font-medium">
+                                <Markdown source={q.prompt} inline />
+                              </span>
+                              <span className="code-cell rounded bg-[var(--lime)] px-1.5 text-[10px] font-bold text-[var(--ink)]">
+                                {LETTERS[q.correctIndex] ?? '?'}
+                              </span>
+                            </button>
+                            {isOpen ? (
+                              <ul className="space-y-1 border-t border-[var(--line)] px-3 py-2 text-[11px]">
+                                {q.options.map((opt, oi) => (
+                                  <li
+                                    key={oi}
+                                    className="flex items-baseline gap-1.5"
+                                    style={{
+                                      color: oi === q.correctIndex ? 'var(--lime)' : 'var(--muted)',
+                                    }}
+                                  >
+                                    <span className="code-cell font-bold">{LETTERS[oi]}.</span>
+                                    <Markdown source={opt} inline />
+                                  </li>
+                                ))}
+                              </ul>
                             ) : null}
                           </div>
-                          {q.optionExplanations?.[oi] ? (
-                            <p className="pl-5 text-[11px] text-[var(--faint)]">
-                              <Markdown source={q.optionExplanations[oi]} inline />
-                            </p>
-                          ) : null}
-                        </li>
-                      ))}
-                    </ul>
-                    {q.explanation ? (
-                      <div className="mx-4 mb-3 rounded-xl bg-[var(--ink-2)] px-3 py-2 text-xs leading-relaxed text-[var(--muted)]">
-                        <Markdown source={q.explanation} />
-                      </div>
-                    ) : (
-                      <p className="mx-4 mb-3 text-xs text-[var(--amber)]">
-                        No explanation provided for this question.
-                      </p>
-                    )}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-            );
-          })}
+              ) : null}
+            </div>
+          ) : (
+            /* Tab 2: Clean PDF / Image AI Extractor */
+            <div className="space-y-3">
+              {api.geminiApiKey.trim() ? (
+                <div className="flex items-center justify-between gap-2 rounded-xl bg-[rgba(215,255,63,0.12)] px-3 py-2 text-xs font-semibold text-[var(--lime)]">
+                  <span className="flex items-center gap-1.5">
+                    <Check size={14} className="shrink-0" />
+                    Key loaded from Profile
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      haptic(5);
+                      setProfileOpen(true);
+                    }}
+                    className="underline underline-offset-2"
+                  >
+                    Edit
+                  </button>
+                </div>
+              ) : null}
+
+              {!hasApiKey ? (
+                <div className="space-y-2.5 rounded-2xl bg-[var(--surface)] p-3.5 shadow-[0_0_0_1px_var(--line)]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-xs font-bold text-[var(--amber)]">
+                      <Lock size={14} /> Gemini API key required
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        haptic(6);
+                        setProfileOpen(true);
+                      }}
+                      className="btn-secondary !min-h-[32px] !rounded-lg !px-2.5 text-xs"
+                    >
+                      <KeyRound size={12} /> Add API Key in Profile
+                    </button>
+                  </div>
+                  <input
+                    id="gemini-key"
+                    type="password"
+                    autoComplete="off"
+                    className="field code-cell !min-h-[40px] text-xs"
+                    placeholder="Or paste AIza... key here"
+                    value={apiKey}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setApiKey(val);
+                      api.setGeminiApiKey(val.trim());
+                      try {
+                        if (val.trim()) window.localStorage.setItem(KEY_STORAGE, val.trim());
+                        else window.localStorage.removeItem(KEY_STORAGE);
+                      } catch {
+                        /* ignore */
+                      }
+                    }}
+                  />
+                </div>
+              ) : (
+                <div className="space-y-2.5 rounded-2xl border-2 border-dashed border-[var(--line-strong)] bg-[var(--ink-2)] p-4 text-center">
+                  <button
+                    type="button"
+                    onClick={() => mediaFileRef.current?.click()}
+                    className="btn-secondary mx-auto !min-h-[40px] !px-4 text-xs"
+                  >
+                    <FileUp size={15} /> Choose PDF or Images
+                  </button>
+
+                  {attachments.length > 0 ? (
+                    <div className="flex flex-wrap justify-center gap-1.5 pt-1">
+                      {attachments.map((att, idx) => {
+                        const isPdf = att.mimeType === 'application/pdf';
+                        return (
+                          <div
+                            key={`${att.name}-${idx}`}
+                            className="pop inline-flex max-w-full items-center gap-1.5 rounded-xl bg-[var(--surface)] px-2.5 py-1 text-xs shadow-[0_0_0_1px_var(--line-strong)]"
+                          >
+                            {isPdf ? (
+                              <FileText size={13} className="shrink-0 text-[var(--coral)]" />
+                            ) : (
+                              <ImageIcon size={13} className="shrink-0 text-[var(--peri)]" />
+                            )}
+                            <span className="max-w-[140px] truncate font-semibold">
+                              {att.name}
+                            </span>
+                            {att.sizeBytes ? (
+                              <span className="text-[10px] text-[var(--muted)] tabular">
+                                {formatBytes(att.sizeBytes)}
+                              </span>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => removeAttachment(idx)}
+                              className="press rounded-full p-0.5 text-[var(--muted)] hover:text-[var(--coral)]"
+                              aria-label={`Remove ${att.name}`}
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
+              <input
+                ref={mediaFileRef}
+                type="file"
+                multiple
+                accept="application/pdf,.pdf,image/png,image/jpeg,image/webp"
+                className="hidden"
+                onChange={(e) => {
+                  void handleMediaFiles(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+
+              {hasApiKey ? (
+                <div className="flex items-center justify-between gap-3 rounded-xl bg-[var(--surface)] px-3 py-2 shadow-[0_0_0_1px_var(--line)]">
+                  <span className="text-xs text-[var(--muted)]">
+                    Also smart-parse pasted Markdown
+                  </span>
+                  <Toggle
+                    checked={effectiveUseGemini}
+                    onChange={setUseGemini}
+                    disabled={hasAttachments}
+                    label="Gemini smart parse"
+                  />
+                </div>
+              ) : null}
+            </div>
+          )}
         </div>
-      )}
-    </Sheet>
-    <ProfileEditSheet open={profileOpen} onClose={() => setProfileOpen(false)} api={api} />
+      </Sheet>
+      <ProfileEditSheet open={profileOpen} onClose={() => setProfileOpen(false)} api={api} />
     </>
   );
 }

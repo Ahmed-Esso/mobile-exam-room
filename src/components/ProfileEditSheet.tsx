@@ -9,12 +9,23 @@ import {
   KeyRound,
   Loader2,
   Lock,
+  SlidersHorizontal,
   Sparkles,
   User,
 } from 'lucide-react';
 import { AVATAR_OPTIONS, type UseRoomReturn } from '@/types/exam';
 import AnimalAvatarArt, { animalLabel } from './AnimalAvatarArt';
-import { ANIMAL_NAMES, autoName, readProfile } from './profile';
+import {
+  ANIMAL_NAMES,
+  DEFAULT_LAYOUT,
+  autoName,
+  readLayout,
+  readProfile,
+  saveLayout,
+  type LayoutDensity,
+  type LayoutPreferences,
+  type LayoutScale,
+} from './profile';
 import { Avatar, Sheet, haptic } from './ui';
 
 export default function ProfileEditSheet({
@@ -41,11 +52,13 @@ export default function ProfileEditSheet({
   const [showKey, setShowKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
+  const [layout, setLayout] = useState<LayoutPreferences>(DEFAULT_LAYOUT);
 
   useEffect(() => {
     if (!open) return;
     setSavedNotice(false);
     setShowKey(false);
+    setLayout(readLayout());
     const localProf = readProfile();
     const resolvedAvatar =
       initialAvatar || me?.avatar || account?.avatar || localProf?.avatar || AVATAR_OPTIONS[0];
@@ -273,6 +286,81 @@ export default function ProfileEditSheet({
               ? 'PDF & Screenshot AI Extractor unlocked across all rooms'
               : 'Optional — needed only if you upload PDFs or exam screenshots'}
           </p>
+        </div>
+
+        {/* App Layout & Size */}
+        <div className="rounded-2xl bg-[var(--surface)] p-3.5 shadow-[0_0_0_1px_var(--line)]">
+          <div className="flex items-center gap-1.5 text-sm font-bold text-[var(--paper)]">
+            <SlidersHorizontal size={15} className="text-[var(--lime)]" />
+            App Layout &amp; Size
+          </div>
+          <p className="mt-0.5 text-xs text-[var(--muted)]">
+            Applies immediately across every screen.
+          </p>
+
+          <div className="mt-3 space-y-2.5">
+            <div>
+              <span className="label text-[11px]">Layout density</span>
+              <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+                {(
+                  [
+                    { id: 'compact', label: 'Compact' },
+                    { id: 'normal', label: 'Balanced' },
+                    { id: 'comfortable', label: 'Spacious' },
+                  ] as { id: LayoutDensity; label: string }[]
+                ).map((opt) => {
+                  const active = layout.density === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        haptic(5);
+                        const next = { ...layout, density: opt.id };
+                        setLayout(next);
+                        saveLayout(next);
+                      }}
+                      className="chip justify-center text-xs"
+                      data-active={active}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <span className="label text-[11px]">UI scale</span>
+              <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+                {(
+                  [
+                    { id: 'sm', label: 'Small (90%)' },
+                    { id: 'md', label: 'Default (95%)' },
+                    { id: 'lg', label: 'Large (100%)' },
+                  ] as { id: LayoutScale; label: string }[]
+                ).map((opt) => {
+                  const active = layout.scale === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        haptic(5);
+                        const next = { ...layout, scale: opt.id };
+                        setLayout(next);
+                        saveLayout(next);
+                      }}
+                      className="chip justify-center text-xs"
+                      data-active={active}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Save Footer */}

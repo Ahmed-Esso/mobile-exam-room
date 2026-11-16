@@ -795,8 +795,8 @@ export function mutateRoomInStore(
           activateExam(room, now);
         }
 
-        room.version += 1;
-        room.updatedAt = now;
+        room.version = (room.version || 1) + 2;
+        room.updatedAt = Math.max(now + 1000, (room.updatedAt || now) + 1);
       }
       break;
     }
@@ -833,8 +833,8 @@ export function mutateRoomInStore(
             ? 0
             : Math.max(5, Math.min(180, settings.timePerQuestion));
       }
-      room.version += 1;
-      room.updatedAt = now;
+      room.version = (room.version || 1) + 2;
+      room.updatedAt = Math.max(now + 1000, (room.updatedAt || now) + 1);
       break;
     }
 

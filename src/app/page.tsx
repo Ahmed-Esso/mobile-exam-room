@@ -9,19 +9,38 @@ import ResultsView from '@/components/ResultsView';
 import EmojiReactionOverlay from '@/components/EmojiReactionOverlay';
 import PullToRefresh from '@/components/PullToRefresh';
 import { AVATAR_OPTIONS, type RoomInvite } from '@/types/exam';
-import { autoName, readProfile } from '@/components/profile';
+import {
+  DEFAULT_LAYOUT,
+  LAYOUT_EVENT,
+  applyLayout,
+  autoName,
+  readLayout,
+  readProfile,
+  type LayoutPreferences,
+} from '@/components/profile';
 import { Avatar, haptic } from '@/components/ui';
-
-const STORAGE_ACTIVE_ROOM_KEY = 'exam_room_active_code_v1';
 
 export default function HomePage() {
   const api = useRoom();
   const { room, me, account, error, clearError } = api;
   const [inviteCode, setInviteCode] = useState<string | null>(null);
-  const [rejoinCode, setRejoinCode] = useState<string | null>(null);
+  const [layout, setLayout] = useState<LayoutPreferences>(DEFAULT_LAYOUT);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    const initialLayout = readLayout();
+    setLayout(initialLayout);
+    applyLayout(initialLayout);
+
+    const onLayout = (e: Event) => {
+      const detail = (e as CustomEvent<LayoutPreferences>).detail;
+      if (detail) {
+        setLayout(detail);
+        applyLayout(detail);
+      }
+    };
+    window.addEventListener(LAYOUT_EVENT, onLayout);
+
     try {
       const params = new URLSearchParams(window.location.search);
       const roomParam = params
@@ -33,13 +52,11 @@ export default function HomePage() {
       if (roomParam && roomParam.length === 6) {
         setInviteCode(roomParam);
       }
-      const saved = window.localStorage.getItem(STORAGE_ACTIVE_ROOM_KEY);
-      if (saved && saved.length === 6) {
-        setRejoinCode(saved);
-      }
     } catch {
       /* ignore URL/storage access issues */
     }
+
+    return () => window.removeEventListener(LAYOUT_EVENT, onLayout);
   }, []);
 
   const activeInvites: RoomInvite[] = (account?.invites ?? []).filter(
@@ -70,7 +87,7 @@ export default function HomePage() {
 
   return (
     <main className="stage">
-      <div className="phone" data-mode={room?.mode ?? 'wait'}>
+      <div className="phone" data-mode={room?.mode ?? 'wait'} data-density={layout.density}>
         <div className="screen">
           {/* Live Incoming Friend Room Invite Banner */}
           {latestInvite ? (
@@ -130,7 +147,7 @@ export default function HomePage() {
           {/* Screen router wrapped with PullToRefresh */}
           <PullToRefresh onRefresh={handlePullRefresh}>
             {!room || room.status === 'lobby' ? (
-              <LobbyView api={api} inviteCode={inviteCode} rejoinCode={rejoinCode} />
+              <LobbyView api={api} inviteCode={inviteCode} />
             ) : room.status === 'active' ? (
               <ExamArenaView api={api} />
             ) : (

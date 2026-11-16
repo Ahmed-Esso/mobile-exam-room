@@ -67,3 +67,58 @@ export function extractRoomCode(raw: string): string | null {
   const compact = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
   return compact.length === 6 ? compact : null;
 }
+
+/* -------------------------------------------------------------------------- */
+/* App layout density & UI scale preferences                                  */
+/* -------------------------------------------------------------------------- */
+
+export type LayoutDensity = 'compact' | 'normal' | 'comfortable';
+export type LayoutScale = 'sm' | 'md' | 'lg';
+
+export interface LayoutPreferences {
+  density: LayoutDensity;
+  scale: LayoutScale;
+}
+
+export const LAYOUT_STORAGE_KEY = 'exam_room_layout_v1';
+export const LAYOUT_EVENT = 'exam-room-layout-updated';
+
+export const DEFAULT_LAYOUT: LayoutPreferences = {
+  density: 'compact',
+  scale: 'md',
+};
+
+export function readLayout(): LayoutPreferences {
+  try {
+    const raw = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
+    if (!raw) return DEFAULT_LAYOUT;
+    const parsed = JSON.parse(raw) as Partial<LayoutPreferences>;
+    const density: LayoutDensity =
+      parsed.density === 'compact' || parsed.density === 'normal' || parsed.density === 'comfortable'
+        ? parsed.density
+        : DEFAULT_LAYOUT.density;
+    const scale: LayoutScale =
+      parsed.scale === 'sm' || parsed.scale === 'md' || parsed.scale === 'lg'
+        ? parsed.scale
+        : DEFAULT_LAYOUT.scale;
+    return { density, scale };
+  } catch {
+    return DEFAULT_LAYOUT;
+  }
+}
+
+export function applyLayout(prefs: LayoutPreferences) {
+  if (typeof document === 'undefined') return;
+  document.documentElement.dataset.scale = prefs.scale;
+  document.documentElement.dataset.density = prefs.density;
+}
+
+export function saveLayout(prefs: LayoutPreferences) {
+  applyLayout(prefs);
+  try {
+    window.localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(prefs));
+    window.dispatchEvent(new CustomEvent<LayoutPreferences>(LAYOUT_EVENT, { detail: prefs }));
+  } catch {
+    /* ignore */
+  }
+}

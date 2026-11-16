@@ -68,6 +68,8 @@ export function useRoom(): UseRoomReturn {
   const roomRef = useRef<RoomState | null>(null);
   const accountRef = useRef<UserAccount | null>(null);
   const directoryMapRef = useRef<Map<string, PublicDirectoryUser>>(new Map());
+  const syncStartedAtRef = useRef<number>(0);
+  const lastLocalMutationAtRef = useRef<number>(0);
 
   useEffect(() => {
     const id = getOrCreateLocalMemberId();
@@ -471,6 +473,8 @@ export function useRoom(): UseRoomReturn {
     const code = room.code;
 
     const syncWithServer = async () => {
+      const requestStartedAt = Date.now();
+      syncStartedAtRef.current = requestStartedAt;
       try {
         const currentRoom = roomRef.current;
         const activeMemberId = memberId || getOrCreateLocalMemberId();
@@ -486,6 +490,10 @@ export function useRoom(): UseRoomReturn {
         });
         if (!res.ok) return;
         const data = await res.json();
+        // Discard stale in-flight sync response if a local optimistic mutation happened after this poll started
+        if (lastLocalMutationAtRef.current > requestStartedAt) {
+          return;
+        }
         if (!cancelled && data?.room) {
           setRoom((prev) => {
             if (!prev) return data.room;
@@ -1058,6 +1066,8 @@ export function useRoom(): UseRoomReturn {
     async (action: string, payload: Record<string, unknown> = {}) => {
       const currentRoom = roomRef.current;
       if (!currentRoom?.code) return;
+      const actionSentAt = Date.now();
+      lastLocalMutationAtRef.current = actionSentAt;
       try {
         const activeMemberId = memberId || getOrCreateLocalMemberId();
         const res = await fetch(
@@ -1074,6 +1084,10 @@ export function useRoom(): UseRoomReturn {
           }
         );
         const data = await res.json();
+        if (lastLocalMutationAtRef.current > actionSentAt) {
+          // A newer optimistic mutation occurred while this request was in flight
+          return;
+        }
         if (res.ok && data?.room) {
           applyAndBroadcastRoom(data.room, true);
         } else if (data?.error) {
@@ -1088,19 +1102,90 @@ export function useRoom(): UseRoomReturn {
 
   const toggleReady = useCallback(
     async (ready?: boolean) => {
+      const currentRoom = roomRef.current;
+      const activeMemberId = memberId || getOrCreateLocalMemberId();
+      if (currentRoom && currentRoom.status === 'lobby') {
+        const now = Date.now();
+        lastLocalMutationAtRef.current = now;
+        const updatedMembers = currentRoom.members.map((m) => {
+          if (m.id !== activeMemberId) return m;
+          const nextReady =
+            typeof ready === 'boolean' ? ready : !Boolean(m.isReady);
+          return {
+            ...m,
+            isReady: nextReady,
+            lastSeenAt: now + 1000,
+          };
+        });
+        const allReady =
+          updatedMembers.length >= 2 &&
+          currentRoom.questions.length > 0 &&
+          updatedMembers.every((m) => Boolean(m.isReady));
+
+        const optimisticRoom: RoomState = {
+          ...currentRoom,
+          status: allReady ? 'active' : currentRoom.status,
+          currentQuestionIndex: allReady ? 0 : currentRoom.currentQuestionIndex,
+          questionStartedAt: allReady ? now : currentRoom.questionStartedAt,
+          examSessionId: allReady ? now : currentRoom.examSessionId,
+          members: allReady
+            ? updatedMembers.map((m) => ({
+                ...m,
+                isReady: false,
+                readyForNextQuestionIndex: -1,
+                score: 0,
+                streak: 0,
+                bestStreak: 0,
+                correctCount: 0,
+                totalTimeMs: 0,
+                answers: {},
+              }))
+            : updatedMembers,
+          version: (currentRoom.version || 1) + 2,
+          updatedAt: Math.max(now + 1000, (currentRoom.updatedAt || now) + 1),
+        };
+        applyAndBroadcastRoom(optimisticRoom, true);
+      }
+
       await postRoomAction(
         'toggleReady',
         typeof ready === 'boolean' ? { ready } : {}
       );
     },
-    [postRoomAction]
+    [memberId, applyAndBroadcastRoom, postRoomAction]
   );
 
   const updateSettings = useCallback(
     async (settings: RoomSettingsUpdate) => {
+      const currentRoom = roomRef.current;
+      if (currentRoom) {
+        const now = Date.now();
+        lastLocalMutationAtRef.current = now;
+        const optimisticRoom: RoomState = {
+          ...currentRoom,
+          title:
+            typeof settings.title === 'string' && settings.title.trim()
+              ? settings.title.trim()
+              : currentRoom.title,
+          mode:
+            settings.mode === 'wait' || settings.mode === 'race'
+              ? settings.mode
+              : currentRoom.mode,
+          timePerQuestion:
+            typeof settings.timePerQuestion === 'number'
+              ? settings.timePerQuestion <= 0
+                ? 0
+                : Math.max(5, Math.min(180, settings.timePerQuestion))
+              : currentRoom.timePerQuestion,
+          version: (currentRoom.version || 1) + 2,
+          updatedAt: Math.max(now + 1000, (currentRoom.updatedAt || now) + 1),
+        };
+        applyAndBroadcastRoom(optimisticRoom, true);
+      }
+
       await postRoomAction('updateSettings', { settings });
     },
-    [postRoomAction]
+    [applyAndBroadcastRoom, postRoomAction]
   );
 
   const setQuestions = useCallback(

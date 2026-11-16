@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowRight,
   AtSign,
   Check,
   ClipboardPaste,
@@ -13,8 +12,8 @@ import {
   LogOut,
   Pencil,
   Plus,
-  RotateCcw,
   ShieldCheck,
+  SlidersHorizontal,
   UserPlus,
   Users,
   X,
@@ -31,14 +30,12 @@ import { ANIMAL_NAMES, autoName, extractRoomCode, readProfile, saveProfile } fro
 export default function LobbyView({
   api,
   inviteCode,
-  rejoinCode,
 }: {
   api: UseRoomReturn;
   inviteCode: string | null;
-  rejoinCode: string | null;
 }) {
   if (api.room) return <RoomLobby api={api} />;
-  return <JoinScreen api={api} inviteCode={inviteCode} rejoinCode={rejoinCode} />;
+  return <JoinScreen api={api} inviteCode={inviteCode} />;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -46,14 +43,12 @@ export default function LobbyView({
 function JoinScreen({
   api,
   inviteCode,
-  rejoinCode,
 }: {
   api: UseRoomReturn;
   inviteCode: string | null;
-  rejoinCode: string | null;
 }) {
   const { account } = api;
-  const [avatar, setAvatar] = useState<string>(AVATAR_OPTIONS[0]); // 🐥 by default
+  const [avatar, setAvatar] = useState<string>(AVATAR_OPTIONS[0]);
   const [name, setName] = useState('');
   const [custom, setCustom] = useState(false);
   const [tab, setTab] = useState<'create' | 'join'>(inviteCode ? 'join' : 'create');
@@ -63,12 +58,13 @@ function JoinScreen({
   const [signInOpen, setSignInOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
 
-  // @username editing + friend lookup
+  // @username editing + collapsible friend lookup
   const [editingHandle, setEditingHandle] = useState(false);
   const [handleInput, setHandleInput] = useState('');
   const [savingHandle, setSavingHandle] = useState(false);
   const [copiedHandle, setCopiedHandle] = useState(false);
 
+  const [addFriendOpen, setAddFriendOpen] = useState(false);
   const [friendInput, setFriendInput] = useState('');
   const [addingFriend, setAddingFriend] = useState(false);
   const [suggestions, setSuggestions] = useState<PublicDirectoryUser[]>([]);
@@ -82,7 +78,7 @@ function JoinScreen({
       setName(p.name);
       setCustom(p.custom);
     } else {
-      const a = AVATAR_OPTIONS[0]; // 🐥
+      const a = AVATAR_OPTIONS[0];
       setAvatar(a);
       setName(autoName(a));
     }
@@ -106,9 +102,9 @@ function JoinScreen({
     }
   }, [inviteCode]);
 
-  // Live @username autocomplete lookup
+  // Live @username autocomplete lookup (only when addFriendOpen is expanded)
   useEffect(() => {
-    if (!account) {
+    if (!account || !addFriendOpen) {
       setSuggestions([]);
       return;
     }
@@ -134,7 +130,7 @@ function JoinScreen({
       cancelled = true;
       window.clearTimeout(t);
     };
-  }, [friendInput, account, api]);
+  }, [friendInput, account, addFriendOpen, api]);
 
   const pickAvatar = (a: string) => {
     haptic(6);
@@ -210,6 +206,7 @@ function JoinScreen({
     if (ok) {
       setFriendInput('');
       setSuggestions([]);
+      setAddFriendOpen(false);
     }
   };
 
@@ -217,18 +214,30 @@ function JoinScreen({
 
   return (
     <div className="scroll-area">
-      <div className="pt-safe flex min-h-full flex-col px-5 pb-8">
-        {/* Wordmark + Install + Account Switcher */}
-        <header className="flex items-center justify-between gap-2 pt-2">
+      <div className="pt-safe flex min-h-full flex-col px-4 pb-5">
+        {/* Compact Header */}
+        <header className="flex items-center justify-between gap-2 pt-1">
           <div className="flex items-center gap-2">
-            <span className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-[var(--lime)] font-display text-lg font-extrabold text-[var(--ink)] shadow-[inset_0_-2px_0_rgba(0,0,0,0.2)]">
+            <span className="flex h-7 w-7 items-center justify-center rounded-[9px] bg-[var(--lime)] font-display text-base font-extrabold text-[var(--ink)] shadow-[inset_0_-2px_0_rgba(0,0,0,0.2)]">
               e
             </span>
-            <span className="font-display text-[17px] font-bold">exam room</span>
+            <span className="font-display text-base font-bold">exam room</span>
           </div>
 
           <div className="flex items-center gap-1.5">
             <InstallAppButton compact />
+            <button
+              type="button"
+              onClick={() => {
+                haptic(5);
+                setProfileOpen(true);
+              }}
+              aria-label="App layout and profile settings"
+              title="Profile & Layout Settings"
+              className="press flex h-8 w-8 items-center justify-center rounded-full bg-[var(--surface-2)] text-[var(--paper)] shadow-[0_0_0_1px_var(--line)]"
+            >
+              <SlidersHorizontal size={14} />
+            </button>
             {account ? (
               <button
                 type="button"
@@ -236,11 +245,11 @@ function JoinScreen({
                   haptic(6);
                   api.logoutAccount();
                 }}
-                className="chip h-9 min-h-0 max-w-[160px] px-3 text-xs"
+                className="chip !h-8 !min-h-0 max-w-[140px] !px-2.5 text-xs"
                 title={`Signed in as @${account.username} (${account.email}). Tap to sign out.`}
               >
                 <span className="truncate font-semibold text-[var(--lime)]">@{account.username}</span>
-                <LogOut size={13} className="shrink-0 text-[var(--muted)]" />
+                <LogOut size={12} className="shrink-0 text-[var(--muted)]" />
               </button>
             ) : (
               <button
@@ -249,7 +258,7 @@ function JoinScreen({
                   haptic(6);
                   setSignInOpen(true);
                 }}
-                className="chip h-9 min-h-0 px-3 text-xs"
+                className="chip !h-8 !min-h-0 !px-2.5 text-xs"
               >
                 <span className="h-2 w-2 rounded-full bg-[var(--lime)]" />
                 Sign in
@@ -258,54 +267,19 @@ function JoinScreen({
           </div>
         </header>
 
-        {/* Headline */}
-        <section className="rise mt-8">
-          <h1 className="font-display text-[38px] font-extrabold leading-[0.98] tracking-[-0.035em] [text-wrap:balance]">
-            {inviteCode ? (
-              <>
-                You&apos;re invited to{' '}
-                <span className="highlight-text" style={{ backgroundSize: '100% 46%' }}>
-                  room {inviteCode}
-                </span>
-              </>
-            ) : (
-              <>
-                Take the exam{' '}
-                <span className="highlight-text" style={{ backgroundSize: '100% 46%' }}>
-                  together.
-                </span>
-              </>
-            )}
-          </h1>
-          <p className="mt-3 max-w-[33ch] text-[15px] leading-relaxed text-[var(--muted)]">
-            {account
-              ? `Verified as @${account.username}. Share your handle so friends can add you and send 1-tap room invites.`
-              : 'Play right away as a guest, or sign in with Google to claim your @username and add friends.'}
-          </p>
-        </section>
-
-        {rejoinCode && !inviteCode ? (
-          <button
-            type="button"
-            onClick={() => {
-              setCode(rejoinCode);
-              void go('join', rejoinCode);
-            }}
-            className="press rise mt-5 flex items-center gap-3 rounded-2xl bg-[var(--surface)] px-4 py-3 text-left shadow-[0_0_0_1px_var(--line)]"
-          >
-            <RotateCcw size={18} className="text-[var(--lime)]" />
-            <span className="flex-1 text-sm">
-              Jump back into <span className="code-cell font-bold tracking-wider">{rejoinCode}</span>
-            </span>
-            <ArrowRight size={16} className="text-[var(--muted)]" />
-          </button>
+        {/* Compact invite pill if arriving via ?room=CODE */}
+        {inviteCode ? (
+          <div className="rise mt-2.5 flex items-center justify-between rounded-xl bg-[rgba(215,255,63,0.12)] px-3 py-1.5 text-xs font-semibold text-[var(--lime)] shadow-[0_0_0_1px_rgba(215,255,63,0.3)]">
+            <span>Invited to room</span>
+            <span className="code-cell font-extrabold tracking-widest">{inviteCode}</span>
+          </div>
         ) : null}
 
-        {/* Profile */}
-        <section className="panel rise mt-5 p-4" style={{ animationDelay: '60ms' }}>
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <span className="text-xs font-bold uppercase tracking-wider text-[var(--muted)]">
-              Your profile
+        {/* Compact Profile Card */}
+        <section className="panel rise mt-3 p-3" style={{ animationDelay: '40ms' }}>
+          <div className="flex items-center justify-between gap-2 pb-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--muted)]">
+              Profile
             </span>
             <button
               type="button"
@@ -313,42 +287,41 @@ function JoinScreen({
                 haptic(6);
                 setProfileOpen(true);
               }}
-              className="chip !h-7 !min-h-0 !px-2.5 text-[11px]"
+              className="chip !h-6 !min-h-0 !px-2 text-[11px]"
             >
-              <Pencil size={11} />
-              Edit Profile
+              <Pencil size={10} />
+              Edit &amp; Layout
               {api.geminiApiKey ? (
-                <span className="ml-0.5 rounded-full bg-[var(--lime)] px-1.5 py-0.5 text-[9px] font-extrabold text-[var(--ink)]">
+                <span className="ml-0.5 rounded-full bg-[var(--lime)] px-1.5 text-[9px] font-extrabold text-[var(--ink)]">
                   AI ✓
                 </span>
               ) : null}
             </button>
           </div>
-          <div className="flex items-center gap-4">
+
+          <div className="flex items-center gap-3">
             <button
               type="button"
               onClick={shuffle}
-              className="press relative"
+              className="press relative shrink-0"
               aria-label="Shuffle avatar"
             >
               <span key={avatarSpin} className="pop block">
-                <Avatar emoji={avatar} size={72} ring="me" />
+                <Avatar emoji={avatar} size={52} ring="me" />
               </span>
-              <span className="absolute -bottom-1 -right-1 flex h-7 w-7 items-center justify-center rounded-full bg-[var(--paper)] text-[var(--ink)] shadow-md">
-                <Dices size={15} />
+              <span className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--paper)] text-[var(--ink)] shadow">
+                <Dices size={11} />
               </span>
             </button>
             <div className="min-w-0 flex-1">
-              <label htmlFor="nickname" className="label">
-                {account ? 'Account display name' : 'Guest nickname'}
-              </label>
               <input
                 id="nickname"
-                className="field mt-1.5 font-semibold"
+                className="field !min-h-[42px] text-sm font-semibold"
                 value={name}
                 maxLength={18}
                 autoComplete="nickname"
-                placeholder="Nickname"
+                placeholder={account ? 'Display name' : 'Guest nickname'}
+                aria-label={account ? 'Account display name' : 'Guest nickname'}
                 onChange={(e) => {
                   setName(e.target.value);
                   setCustom(true);
@@ -357,23 +330,22 @@ function JoinScreen({
             </div>
           </div>
 
-          {/* @username pill when signed in with Google */}
+          {/* Inline @username pill when signed in */}
           {account ? (
-            <div className="mt-3 rounded-2xl bg-[var(--ink-2)] p-3 shadow-[0_0_0_1px_var(--line)]">
+            <div className="mt-2 rounded-xl bg-[var(--ink-2)] px-2.5 py-1.5 shadow-[0_0_0_1px_var(--line)]">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-1.5 text-xs">
-                  <ShieldCheck size={14} className="shrink-0 text-[var(--lime)]" />
+                  <ShieldCheck size={13} className="shrink-0 text-[var(--lime)]" />
                   <span className="font-bold text-[var(--paper)]">@{account.username}</span>
-                  <span className="truncate text-[var(--faint)]">· {account.email}</span>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   <button
                     type="button"
                     onClick={() => void handleCopyUsername()}
-                    className="chip !h-7 !min-h-0 !px-2.5 text-[11px]"
+                    className="chip !h-6 !min-h-0 !px-2 text-[10px]"
                     data-active={copiedHandle}
                   >
-                    {copiedHandle ? <Check size={12} /> : <Copy size={12} />}
+                    {copiedHandle ? <Check size={11} /> : <Copy size={11} />}
                     {copiedHandle ? 'Copied' : 'Copy'}
                   </button>
                   <button
@@ -382,20 +354,20 @@ function JoinScreen({
                       setHandleInput(account.username);
                       setEditingHandle((v) => !v);
                     }}
-                    className="chip !h-7 !min-h-0 !px-2 text-[11px]"
+                    className="chip !h-6 !min-h-0 !px-1.5 text-[10px]"
                     aria-label="Edit username"
                   >
-                    <Pencil size={12} />
+                    <Pencil size={10} />
                   </button>
                 </div>
               </div>
 
               {editingHandle ? (
-                <form onSubmit={handleSaveUsername} className="mt-2.5 flex gap-2">
+                <form onSubmit={handleSaveUsername} className="mt-2 flex gap-1.5">
                   <div className="relative flex-1">
                     <AtSign
-                      size={14}
-                      className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]"
+                      size={13}
+                      className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)]"
                     />
                     <input
                       type="text"
@@ -406,22 +378,22 @@ function JoinScreen({
                         )
                       }
                       placeholder="new_username"
-                      className="field code-cell !min-h-[40px] pl-8 text-xs"
+                      className="field code-cell !min-h-[36px] pl-7 text-xs"
                     />
                   </div>
                   <button
                     type="submit"
                     disabled={savingHandle || handleInput.trim().length < 3}
-                    className="btn-primary !min-h-[40px] shrink-0 !rounded-xl !px-3 text-xs"
+                    className="btn-primary !min-h-[36px] shrink-0 !rounded-xl !px-3 text-xs"
                   >
-                    {savingHandle ? <Loader2 size={14} className="animate-spin" /> : 'Save'}
+                    {savingHandle ? <Loader2 size={13} className="animate-spin" /> : 'Save'}
                   </button>
                 </form>
               ) : null}
             </div>
           ) : null}
 
-          <div className="no-scrollbar -mx-4 mt-4 flex gap-2 overflow-x-auto px-4 pb-1">
+          <div className="no-scrollbar -mx-3 mt-2.5 flex gap-1.5 overflow-x-auto px-3 pb-0.5">
             {AVATAR_OPTIONS.map((a) => (
               <button
                 key={a}
@@ -429,25 +401,25 @@ function JoinScreen({
                 onClick={() => pickAvatar(a)}
                 aria-label={`Avatar ${ANIMAL_NAMES[a] ?? a}`}
                 aria-pressed={a === avatar}
-                className="press flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-[14px]"
+                className="press flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl"
                 style={{
                   background: a === avatar ? 'var(--surface-3)' : 'var(--surface-2)',
                   boxShadow: a === avatar ? '0 0 0 2px var(--lime)' : '0 0 0 1px var(--line)',
-                  transform: a === avatar ? 'translateY(-2px)' : undefined,
+                  transform: a === avatar ? 'translateY(-1px)' : undefined,
                 }}
               >
-                <AnimalAvatarArt emoji={a} size={36} />
+                <AnimalAvatarArt emoji={a} size={30} />
               </button>
             ))}
           </div>
         </section>
 
         {/* Create / Join */}
-        <section className="rise mt-4" style={{ animationDelay: '100ms' }}>
-          <div className="relative grid grid-cols-2 rounded-2xl bg-[var(--ink-2)] p-1 shadow-[inset_0_2px_4px_rgba(0,0,0,0.4),0_0_0_1px_var(--line)]">
+        <section className="rise mt-3" style={{ animationDelay: '70ms' }}>
+          <div className="relative grid grid-cols-2 rounded-xl bg-[var(--ink-2)] p-1 shadow-[inset_0_2px_4px_rgba(0,0,0,0.4),0_0_0_1px_var(--line)]">
             <span
               aria-hidden
-              className="absolute bottom-1 top-1 w-[calc(50%-4px)] rounded-xl bg-[var(--surface-3)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] transition-transform duration-300"
+              className="absolute bottom-1 top-1 w-[calc(50%-4px)] rounded-lg bg-[var(--surface-3)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] transition-transform duration-300"
               style={{
                 transform: tab === 'join' ? 'translateX(calc(100% + 0px))' : 'translateX(0)',
                 left: 4,
@@ -461,9 +433,9 @@ function JoinScreen({
                 onClick={() => {
                   haptic(5);
                   setTab(t);
-                  if (t === 'join') setTimeout(() => codeRef.current?.focus(), 250);
+                  if (t === 'join') setTimeout(() => codeRef.current?.focus(), 200);
                 }}
-                className="press relative z-10 h-11 rounded-xl text-sm font-semibold"
+                className="press relative z-10 h-10 rounded-lg text-sm font-semibold"
                 style={{ color: tab === t ? 'var(--paper)' : 'var(--muted)' }}
               >
                 {t === 'create' ? 'Start a room' : 'Join with code'}
@@ -472,38 +444,38 @@ function JoinScreen({
           </div>
 
           {tab === 'create' ? (
-            <div key="create" className="rise mt-4 space-y-3">
+            <div key="create" className="rise mt-2.5">
               <button
                 type="button"
-                className="btn-primary h-14 w-full text-base"
+                className="btn-primary h-12 w-full text-sm"
                 disabled={api.isLoading}
                 onClick={() => void go('create')}
               >
                 {api.isLoading ? (
-                  <Loader2 size={20} className="animate-spin" />
+                  <Loader2 size={18} className="animate-spin" />
                 ) : (
-                  <Plus size={20} strokeWidth={2.5} />
+                  <Plus size={18} strokeWidth={2.5} />
                 )}
                 Create room
               </button>
             </div>
           ) : (
-            <div key="join" className="rise mt-4 space-y-3">
+            <div key="join" className="rise mt-2.5 space-y-2.5">
               <label className="relative block" htmlFor="room-code">
                 <span className="sr-only">Room code</span>
-                <div className="grid grid-cols-6 gap-2">
+                <div className="grid grid-cols-6 gap-1.5">
                   {cells.map((c, i) => {
                     const active = codeFocused && (i === code.length || (i === 5 && code.length === 6));
                     return (
                       <div
                         key={i}
-                        className="code-cell relative flex h-[62px] items-center justify-center rounded-2xl text-[26px] font-bold transition-all duration-200"
+                        className="code-cell relative flex h-12 items-center justify-center rounded-xl text-xl font-bold transition-all duration-200"
                         style={{
                           background: c ? 'var(--surface-2)' : 'var(--ink-2)',
                           boxShadow: active
                             ? '0 0 0 2px var(--lime), inset 0 2px 4px rgba(0,0,0,0.3)'
                             : c
-                            ? 'inset 0 1px 0 rgba(255,255,255,0.06), inset 0 -3px 0 rgba(0,0,0,0.35), 0 0 0 1px var(--line)'
+                            ? 'inset 0 1px 0 rgba(255,255,255,0.06), inset 0 -2px 0 rgba(0,0,0,0.35), 0 0 0 1px var(--line)'
                             : 'inset 0 2px 4px rgba(0,0,0,0.4), 0 0 0 1px var(--line)',
                         }}
                       >
@@ -512,7 +484,7 @@ function JoinScreen({
                             {c}
                           </span>
                         ) : active ? (
-                          <span className="caret-blink h-7 w-[2px] rounded bg-[var(--lime)]" />
+                          <span className="caret-blink h-5 w-[2px] rounded bg-[var(--lime)]" />
                         ) : null}
                       </div>
                     );
@@ -550,19 +522,18 @@ function JoinScreen({
                 />
               </label>
 
-              {/* 1-Tap Paste Code button */}
               <div className="flex items-center justify-between gap-2">
                 <button
                   type="button"
                   onClick={() => void handlePasteCode()}
-                  className="chip text-xs"
+                  className="chip !h-7 !min-h-0 !px-2.5 text-xs"
                   data-active={pasteFeedback === 'ok'}
                 >
-                  {pasteFeedback === 'ok' ? <Check size={14} /> : <ClipboardPaste size={14} />}
+                  {pasteFeedback === 'ok' ? <Check size={13} /> : <ClipboardPaste size={13} />}
                   {pasteFeedback === 'ok'
                     ? 'Code pasted!'
                     : pasteFeedback === 'none'
-                    ? 'No 6-char code in clipboard'
+                    ? 'No code in clipboard'
                     : 'Paste Code'}
                 </button>
                 {code.length > 0 ? (
@@ -581,160 +552,154 @@ function JoinScreen({
 
               <button
                 type="button"
-                className="btn-primary h-14 w-full text-base"
+                className="btn-primary h-12 w-full text-sm"
                 disabled={!codeReady || api.isLoading}
                 onClick={() => void go('join')}
               >
                 {api.isLoading ? (
-                  <Loader2 size={20} className="animate-spin" />
+                  <Loader2 size={18} className="animate-spin" />
                 ) : (
-                  <LogIn size={20} strokeWidth={2.5} />
+                  <LogIn size={18} strokeWidth={2.5} />
                 )}
-                {codeReady ? `Join ${code}` : 'Enter the 6-character code'}
+                {codeReady ? `Join ${code}` : 'Enter 6-character code'}
               </button>
             </div>
           )}
         </section>
 
-        {/* Friends Section (Signed in with Google) or Sign-In Prompt */}
-        <section className="panel rise mt-5 p-4" style={{ animationDelay: '140ms' }}>
+        {/* Ultra-Compact Friends Strip */}
+        <section className="panel rise mt-3 p-3" style={{ animationDelay: '100ms' }}>
           {account ? (
             <>
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Users size={17} className="text-[var(--lime)]" />
-                  <h2 className="font-display text-base font-bold">Friends</h2>
-                </div>
-                <span className="text-xs text-[var(--muted)] tabular">
-                  {account.friends.length} {account.friends.length === 1 ? 'friend' : 'friends'}
-                </span>
-              </div>
-
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void handleAddFriend(friendInput);
-                }}
-                className="mt-3 flex gap-2"
-              >
-                <div className="relative flex-1">
-                  <AtSign
-                    size={15}
-                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--muted)]"
-                  />
-                  <input
-                    type="text"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    value={friendInput}
-                    onChange={(e) => setFriendInput(e.target.value)}
-                    placeholder="username (e.g. omar)"
-                    className="field !min-h-[44px] pl-9 text-sm"
-                  />
+                <div className="flex items-center gap-1.5">
+                  <Users size={15} className="text-[var(--lime)]" />
+                  <span className="font-display text-sm font-bold">
+                    Friends ({account.friends.length})
+                  </span>
                 </div>
                 <button
-                  type="submit"
-                  disabled={!friendInput.trim() || addingFriend}
-                  className="btn-secondary !min-h-[44px] shrink-0 !px-3.5 text-xs"
+                  type="button"
+                  onClick={() => {
+                    haptic(5);
+                    setAddFriendOpen((v) => !v);
+                  }}
+                  className="chip !h-7 !min-h-0 !px-2.5 text-xs"
+                  data-active={addFriendOpen}
                 >
-                  {addingFriend ? (
-                    <Loader2 size={15} className="animate-spin" />
-                  ) : (
-                    <UserPlus size={15} />
-                  )}
-                  Add
+                  {addFriendOpen ? <X size={12} /> : <UserPlus size={12} />}
+                  {addFriendOpen ? 'Close' : 'Add Friend'}
                 </button>
-              </form>
+              </div>
 
-              {/* Live @username search suggestions */}
-              {suggestions.length > 0 ? (
-                <div className="mt-2 space-y-1 rounded-2xl bg-[var(--ink-2)] p-2 shadow-[0_0_0_1px_var(--line)]">
-                  <p className="px-2 text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]">
-                    Matching users
-                  </p>
-                  {suggestions.slice(0, 4).map((u) => (
+              {addFriendOpen ? (
+                <div className="rise mt-2.5 space-y-2">
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      void handleAddFriend(friendInput);
+                    }}
+                    className="flex gap-1.5"
+                  >
+                    <div className="relative flex-1">
+                      <AtSign
+                        size={14}
+                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]"
+                      />
+                      <input
+                        type="text"
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        value={friendInput}
+                        onChange={(e) => setFriendInput(e.target.value)}
+                        placeholder="username"
+                        className="field !min-h-[38px] pl-8 text-xs"
+                      />
+                    </div>
                     <button
-                      key={u.username}
-                      type="button"
-                      onClick={() => void handleAddFriend(u.username)}
-                      className="press flex w-full items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-white/5"
+                      type="submit"
+                      disabled={!friendInput.trim() || addingFriend}
+                      className="btn-secondary !min-h-[38px] shrink-0 !rounded-xl !px-3 text-xs"
                     >
-                      <span className="flex min-w-0 items-center gap-2">
-                        <Avatar emoji={u.avatar || '🐥'} size={32} />
-                        <span className="min-w-0">
-                          <span className="block truncate text-xs font-bold">{u.name}</span>
-                          <span className="block truncate text-[11px] text-[var(--lime)]">
-                            @{u.username}
-                          </span>
-                        </span>
-                      </span>
-                      <span className="chip !h-7 !min-h-0 !px-2.5 text-[11px]">+ Add</span>
+                      {addingFriend ? <Loader2 size={14} className="animate-spin" /> : 'Add'}
                     </button>
-                  ))}
+                  </form>
+
+                  {suggestions.length > 0 ? (
+                    <div className="space-y-1 rounded-xl bg-[var(--ink-2)] p-1.5 shadow-[0_0_0_1px_var(--line)]">
+                      {suggestions.slice(0, 3).map((u) => (
+                        <button
+                          key={u.username}
+                          type="button"
+                          onClick={() => void handleAddFriend(u.username)}
+                          className="press flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1 text-left hover:bg-white/5"
+                        >
+                          <span className="flex min-w-0 items-center gap-2">
+                            <Avatar emoji={u.avatar || '🐥'} size={24} />
+                            <span className="truncate text-xs font-bold">{u.name}</span>
+                            <span className="truncate text-[11px] text-[var(--lime)]">
+                              @{u.username}
+                            </span>
+                          </span>
+                          <span className="chip !h-6 !min-h-0 !px-2 text-[10px]">+ Add</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 
               {account.friends.length > 0 ? (
-                <ul className="mt-3 space-y-2">
+                <div className="no-scrollbar -mx-3 mt-2 flex gap-1.5 overflow-x-auto px-3 pb-0.5">
                   {account.friends.map((f) => (
-                    <li
+                    <span
                       key={f.username}
-                      className="flex items-center justify-between gap-2.5 rounded-2xl bg-[var(--ink-2)] px-3 py-2 shadow-[0_0_0_1px_var(--line)]"
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-[var(--ink-2)] py-1 pl-1 pr-2 text-xs shadow-[0_0_0_1px_var(--line)]"
                     >
-                      <div className="flex min-w-0 items-center gap-2.5">
-                        <Avatar emoji={f.avatar || '🐥'} size={34} />
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold">{f.name}</p>
-                          <p className="truncate text-[11px] font-semibold text-[var(--lime)]">
-                            @{f.username}
-                          </p>
-                        </div>
-                      </div>
+                      <Avatar emoji={f.avatar || '🐥'} size={22} />
+                      <span className="font-semibold text-[var(--paper)]">@{f.username}</span>
                       <button
                         type="button"
                         onClick={() => {
                           haptic(5);
                           void api.removeFriendByUsername(f.username);
                         }}
-                        className="press rounded-full p-1.5 text-[var(--muted)] hover:text-[var(--coral)]"
+                        className="press rounded-full p-0.5 text-[var(--muted)] hover:text-[var(--coral)]"
                         aria-label={`Remove @${f.username}`}
                       >
-                        <X size={14} />
+                        <X size={12} />
                       </button>
-                    </li>
+                    </span>
                   ))}
-                </ul>
-              ) : (
-                <p className="mt-3 text-xs text-[var(--muted)]">
-                  Add friends by their <strong className="text-[var(--paper)]">@username</strong> to invite them to any room in 1 tap.
+                </div>
+              ) : !addFriendOpen ? (
+                <p className="mt-1.5 text-[11px] text-[var(--muted)]">
+                  Tap <strong className="text-[var(--paper)]">Add Friend</strong> to invite friends in 1 tap.
                 </p>
-              )}
+              ) : null}
             </>
           ) : (
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <p className="font-display text-sm font-bold">Friends &amp; 1-Tap Room Invites</p>
-                <p className="mt-0.5 text-xs text-[var(--muted)]">
-                  Sign in with Google to get your @username, add friends, and receive live invites.
-                </p>
-              </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-xs text-[var(--muted)]">
+                Want to add friends by <strong className="text-[var(--paper)]">@username</strong>?
+              </span>
               <button
                 type="button"
                 onClick={() => {
                   haptic(6);
                   setSignInOpen(true);
                 }}
-                className="btn-secondary !min-h-[40px] shrink-0 !px-3.5 text-xs"
+                className="chip !h-7 !min-h-0 shrink-0 !px-3 text-xs font-semibold text-[var(--lime)]"
               >
-                Google Sign-In
+                Sign in
               </button>
             </div>
           )}
         </section>
 
-        <p className="mt-auto pt-8 text-center text-xs text-[var(--faint)]">
-          Swipe down anytime to refresh · Rooms clear after 4 quiet hours.
+        <p className="mt-auto pt-4 text-center text-[11px] text-[var(--faint)]">
+          Swipe down to refresh · Rooms expire after 4 quiet hours
         </p>
       </div>
 
